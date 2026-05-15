@@ -21,7 +21,31 @@ def _now() -> str:
 
 
 def _default_config() -> dict:
-    return {**openai_register.config, "mode": "total", "target_quota": 100, "target_available": 10, "check_interval": 5, "enabled": False, "stats": {"success": 0, "fail": 0, "done": 0, "running": 0, "threads": openai_register.config["threads"], "elapsed_seconds": 0, "avg_seconds": 0, "success_rate": 0, "current_quota": 0, "current_available": 0}}
+    return {
+        **openai_register.config,
+        "mode": "total",
+        "target_quota": 100,
+        "target_available": 10,
+        "check_interval": 5,
+        "enabled": False,
+        "cpa_auto_import": {
+            "enabled": False,
+            "base_url": "http://host.docker.internal:8317",
+            "secret_key": "",
+        },
+        "stats": {
+            "success": 0,
+            "fail": 0,
+            "done": 0,
+            "running": 0,
+            "threads": openai_register.config["threads"],
+            "elapsed_seconds": 0,
+            "avg_seconds": 0,
+            "success_rate": 0,
+            "current_quota": 0,
+            "current_available": 0,
+        },
+    }
 
 
 def _normalize(raw: dict) -> dict:
@@ -35,6 +59,12 @@ def _normalize(raw: dict) -> dict:
     cfg["check_interval"] = max(1, int(cfg.get("check_interval") or 5))
     cfg["proxy"] = str(cfg.get("proxy") or "").strip()
     cfg["enabled"] = bool(cfg.get("enabled"))
+    cpa_auto_import = cfg.get("cpa_auto_import") if isinstance(cfg.get("cpa_auto_import"), dict) else {}
+    cfg["cpa_auto_import"] = {
+        "enabled": bool(cpa_auto_import.get("enabled")),
+        "base_url": str(cpa_auto_import.get("base_url") or "http://host.docker.internal:8317").strip(),
+        "secret_key": str(cpa_auto_import.get("secret_key") or "").strip(),
+    }
     stats = {**_default_config()["stats"], **(raw.get("stats") if isinstance(raw.get("stats"), dict) else {}),
              "threads": cfg["threads"]}
     cfg["stats"] = stats
@@ -69,7 +99,7 @@ class RegisterService:
     def update(self, updates: dict) -> dict:
         with self._lock:
             self._config = _normalize({**self._config, **updates})
-            openai_register.config.update({k: self._config[k] for k in ("mail", "proxy", "total", "threads")})
+            openai_register.config.update({k: self._config[k] for k in ("mail", "proxy", "total", "threads", "cpa_auto_import")})
             self._save()
             return self.get()
 
@@ -83,7 +113,7 @@ class RegisterService:
             self._logs = []
             metrics = self._pool_metrics()
             self._config["stats"] = {"job_id": uuid.uuid4().hex, "success": 0, "fail": 0, "done": 0, "running": 0, "threads": self._config["threads"], **metrics, "started_at": _now(), "updated_at": _now()}
-            openai_register.config.update({k: self._config[k] for k in ("mail", "proxy", "total", "threads")})
+            openai_register.config.update({k: self._config[k] for k in ("mail", "proxy", "total", "threads", "cpa_auto_import")})
             with openai_register.stats_lock:
                 openai_register.stats.update({"done": 0, "success": 0, "fail": 0, "start_time": time.time()})
             self._save()

@@ -1,0 +1,18 @@
+services:
+  app:
+    image: ghcr.io/basketikun/chatgpt2api:latest
+    container_name: chatgpt2api
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    volumes:
+      - ./data:/app/data
+      - ./config.json:/app/config.json
+      - ./main.py:/app/main.py:ro
+      - ./api:/app/api:ro
+      - ./services:/app/services:ro
+      - ./utils:/app/utils:ro
+      - ./scripts:/app/scripts:ro
+      - ./web/out:/app/web_dist:ro
+    environment:
+      STORAGE_BACKEND: json

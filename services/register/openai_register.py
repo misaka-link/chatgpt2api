@@ -21,6 +21,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from services.account_service import account_service
+from services.cpa_push_service import push_cpa_auth_file
 from services.register import mail_provider
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -35,11 +36,16 @@ config = {
     "proxy": "",
     "total": 10,
     "threads": 3,
+    "cpa_auto_import": {
+        "enabled": False,
+        "base_url": "http://host.docker.internal:8317",
+        "secret_key": "",
+    },
 }
 register_config_file = base_dir.parents[1] / "data" / "register.json"
 try:
     saved_config = json.loads(register_config_file.read_text(encoding="utf-8"))
-    config.update({key: saved_config[key] for key in ("mail", "proxy", "total", "threads") if key in saved_config})
+    config.update({key: saved_config[key] for key in ("mail", "proxy", "total", "threads", "cpa_auto_import") if key in saved_config})
 except Exception:
     pass
 
@@ -178,6 +184,11 @@ def _decode_jwt_payload(token: str) -> dict:
         return json.loads(base64.urlsafe_b64decode(payload))
     except Exception:
         return {}
+
+
+def _get_cpa_auto_import_config() -> dict:
+    value = config.get("cpa_auto_import")
+    return value if isinstance(value, dict) else {}
 
 
 def create_mailbox(username: str | None = None) -> dict:
@@ -613,6 +624,17 @@ def worker(index: int) -> dict:
         access_token = str(result["access_token"])
         account_service.add_accounts([access_token])
         account_service.refresh_accounts([access_token])
+        cpa_config = _get_cpa_auto_import_config()
+        if bool(cpa_config.get("enabled")):
+            try:
+                account_snapshot = account_service.get_account(access_token) or {}
+                push_result = push_cpa_auth_file(result, cpa_config, account_snapshot)
+                if push_result.get("ok") and not push_result.get("skipped"):
+                    log(f'{result["email"]} CPA 自动导入完成: {push_result.get("name")}', "green")
+                elif not push_result.get("ok"):
+                    log(f'{result["email"]} CPA 自动导入失败: {push_result.get("error")}', "yellow")
+            except Exception as push_error:
+                log(f'{result["email"]} CPA 自动导入失败，原因: {push_error}', "yellow")
         with stats_lock:
             stats["done"] += 1
             stats["success"] += 1

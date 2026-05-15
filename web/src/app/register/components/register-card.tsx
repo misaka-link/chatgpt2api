@@ -23,6 +23,9 @@ export function RegisterCard() {
   const setTargetAvailable = useSettingsStore((state) => state.setRegisterTargetAvailable);
   const setCheckInterval = useSettingsStore((state) => state.setRegisterCheckInterval);
   const setMailField = useSettingsStore((state) => state.setRegisterMailField);
+  const setCpaAutoImportEnabled = useSettingsStore((state) => state.setRegisterCpaAutoImportEnabled);
+  const setCpaAutoImportBaseUrl = useSettingsStore((state) => state.setRegisterCpaAutoImportBaseUrl);
+  const setCpaAutoImportSecretKey = useSettingsStore((state) => state.setRegisterCpaAutoImportSecretKey);
   const addProvider = useSettingsStore((state) => state.addRegisterProvider);
   const updateProvider = useSettingsStore((state) => state.updateRegisterProvider);
   const deleteProvider = useSettingsStore((state) => state.deleteRegisterProvider);
@@ -112,6 +115,46 @@ export function RegisterCard() {
             <div className="space-y-2">
               <label className="text-sm text-stone-700">检查间隔（秒）</label>
               <Input value={String(config.check_interval || "")} onChange={(event) => setCheckInterval(event.target.value)} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled || config.mode === "total"} />
+            </div>
+          </div>
+
+          <div className="space-y-4 border-t border-stone-200 pt-3">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-semibold text-stone-800">CPA 自动导入</h3>
+                <p className="mt-1 text-xs text-stone-500">注册成功后自动推送单个 JSON 到 CLIProxyAPI，失败不影响注册结果。</p>
+              </div>
+              <label className="flex items-center gap-3 text-sm text-stone-700">
+                <Checkbox
+                  checked={Boolean(config.cpa_auto_import?.enabled)}
+                  onCheckedChange={(checked) => setCpaAutoImportEnabled(Boolean(checked))}
+                  disabled={config.enabled}
+                />
+                启用
+              </label>
+            </div>
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className="space-y-2">
+                <label className="text-sm text-stone-700">CLIProxyAPI 地址</label>
+                <Input
+                  value={String(config.cpa_auto_import?.base_url || "")}
+                  onChange={(event) => setCpaAutoImportBaseUrl(event.target.value)}
+                  placeholder="http://host.docker.internal:8317"
+                  className="h-10 rounded-xl border-stone-200 bg-white"
+                  disabled={config.enabled}
+                />
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm text-stone-700">Management Secret Key</label>
+                <Input
+                  value={String(config.cpa_auto_import?.secret_key || "")}
+                  onChange={(event) => setCpaAutoImportSecretKey(event.target.value)}
+                  placeholder="CLIProxyAPI 管理密钥"
+                  className="h-10 rounded-xl border-stone-200 bg-white"
+                  type="password"
+                  disabled={config.enabled}
+                />
+              </div>
             </div>
           </div>
 

@@ -194,6 +194,9 @@ type SettingsStore = {
   setRegisterTargetAvailable: (value: string) => void;
   setRegisterCheckInterval: (value: string) => void;
   setRegisterMailField: (key: "request_timeout" | "wait_timeout" | "wait_interval", value: string) => void;
+  setRegisterCpaAutoImportEnabled: (value: boolean) => void;
+  setRegisterCpaAutoImportBaseUrl: (value: string) => void;
+  setRegisterCpaAutoImportSecretKey: (value: string) => void;
   addRegisterProvider: () => void;
   updateRegisterProvider: (index: number, updates: Record<string, unknown>) => void;
   deleteRegisterProvider: (index: number) => void;
@@ -583,6 +586,54 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     } : {});
   },
 
+  setRegisterCpaAutoImportEnabled: (value) => {
+    set((state) => state.registerConfig ? {
+      registerConfig: {
+        ...state.registerConfig,
+        cpa_auto_import: {
+          ...(state.registerConfig.cpa_auto_import || {
+            enabled: false,
+            base_url: "http://host.docker.internal:8317",
+            secret_key: "",
+          }),
+          enabled: value,
+        },
+      },
+    } : {});
+  },
+
+  setRegisterCpaAutoImportBaseUrl: (value) => {
+    set((state) => state.registerConfig ? {
+      registerConfig: {
+        ...state.registerConfig,
+        cpa_auto_import: {
+          ...(state.registerConfig.cpa_auto_import || {
+            enabled: false,
+            base_url: "http://host.docker.internal:8317",
+            secret_key: "",
+          }),
+          base_url: value,
+        },
+      },
+    } : {});
+  },
+
+  setRegisterCpaAutoImportSecretKey: (value) => {
+    set((state) => state.registerConfig ? {
+      registerConfig: {
+        ...state.registerConfig,
+        cpa_auto_import: {
+          ...(state.registerConfig.cpa_auto_import || {
+            enabled: false,
+            base_url: "http://host.docker.internal:8317",
+            secret_key: "",
+          }),
+          secret_key: value,
+        },
+      },
+    } : {});
+  },
+
   addRegisterProvider: () => {
     set((state) => state.registerConfig ? {
       registerConfig: {
@@ -633,6 +684,11 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         target_quota: Math.max(1, Number(registerConfig.target_quota) || 1),
         target_available: Math.max(1, Number(registerConfig.target_available) || 1),
         check_interval: Math.max(1, Number(registerConfig.check_interval) || 5),
+        cpa_auto_import: {
+          enabled: Boolean(registerConfig.cpa_auto_import?.enabled),
+          base_url: String(registerConfig.cpa_auto_import?.base_url || "").trim(),
+          secret_key: String(registerConfig.cpa_auto_import?.secret_key || "").trim(),
+        },
       });
       set({ registerConfig: data.register });
       toast.success("注册配置已保存");
@@ -658,6 +714,11 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
           target_quota: Math.max(1, Number(registerConfig.target_quota) || 1),
           target_available: Math.max(1, Number(registerConfig.target_available) || 1),
           check_interval: Math.max(1, Number(registerConfig.check_interval) || 5),
+          cpa_auto_import: {
+            enabled: Boolean(registerConfig.cpa_auto_import?.enabled),
+            base_url: String(registerConfig.cpa_auto_import?.base_url || "").trim(),
+            secret_key: String(registerConfig.cpa_auto_import?.secret_key || "").trim(),
+          },
         });
       }
       const data = registerConfig.enabled ? await stopRegister() : await startRegister();
