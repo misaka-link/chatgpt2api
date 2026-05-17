@@ -239,6 +239,227 @@ class OpenAIRegisterLoginFlowTests(unittest.TestCase):
         self.assertIn("redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback", authorize_calls[0][1])
         exchange.assert_called_once()
 
+    def test_codex_login_follows_auth_internal_authorize_redirect_before_password_verify(self):
+        class CodexRedirectSession:
+            def __init__(self):
+                self.calls = []
+                self.cookies = mock.Mock()
+
+            def request(self, method, url, **kwargs):
+                self.calls.append((method.upper(), url, kwargs))
+                if "/oauth/authorize" in url:
+                    return FakeResponse(
+                        status_code=302,
+                        headers={"Location": "https://auth.openai.com/api/oauth/oauth2/auth?login_challenge=lc"},
+                        url=url,
+                    )
+                if "/api/oauth/oauth2/auth" in url:
+                    return FakeResponse(status_code=200, url=url)
+                if "/api/accounts/password/verify" in url:
+                    return FakeResponse(
+                        status_code=200,
+                        json_data={
+                            "continue_url": "http://localhost:1455/auth/callback?code=codex123&state=st&scope=openid",
+                            "page": {"type": "done"},
+                        },
+                    )
+                raise AssertionError(f"unexpected request {method} {url}")
+
+        session = CodexRedirectSession()
+        registrar = openai_register.PlatformRegistrar.__new__(openai_register.PlatformRegistrar)
+        registrar.session = session
+        registrar.device_id = "device-1"
+        expected_tokens = {"access_token": "access", "refresh_token": "refresh", "id_token": "id"}
+
+        with (
+            mock.patch.object(openai_register, "exchange_oauth_callback_params", return_value=expected_tokens, create=True),
+            mock.patch.object(openai_register, "build_sentinel_token", return_value="sentinel"),
+            mock.patch.object(openai_register, "step"),
+        ):
+            tokens = registrar._login_and_exchange_tokens(
+                "user@example.com",
+                "Password1!",
+                {},
+                1,
+                profile=openai_register.codex_oauth_profile,
+            )
+
+        self.assertEqual(tokens, expected_tokens)
+        self.assertTrue(any("/api/oauth/oauth2/auth" in url for _, url, _ in session.calls))
+        password_call_index = next(index for index, (_, url, _) in enumerate(session.calls) if "/api/accounts/password/verify" in url)
+        redirect_call_index = next(index for index, (_, url, _) in enumerate(session.calls) if "/api/oauth/oauth2/auth" in url)
+        self.assertLess(redirect_call_index, password_call_index)
+
+    def test_codex_login_follows_accounts_login_but_not_password_page_redirect(self):
+        class CodexLoginPageRedirectSession:
+            def __init__(self):
+                self.calls = []
+                self.cookies = mock.Mock()
+
+            def request(self, method, url, **kwargs):
+                self.calls.append((method.upper(), url, kwargs))
+                if "/oauth/authorize" in url:
+                    return FakeResponse(
+                        status_code=302,
+                        headers={"Location": "https://auth.openai.com/api/oauth/oauth2/auth?login_challenge=lc"},
+                        url=url,
+                    )
+                if "/api/oauth/oauth2/auth" in url:
+                    return FakeResponse(
+                        status_code=302,
+                        headers={"Location": "https://auth.openai.com/api/accounts/login?login_challenge=lc"},
+                        url=url,
+                    )
+                if "/api/accounts/login" in url:
+                    return FakeResponse(
+                        status_code=302,
+                        headers={"Location": "https://auth.openai.com/log-in/password"},
+                        url=url,
+                    )
+                if "/log-in/password" in url:
+                    raise AssertionError("password page redirects should not be chased before password_verify")
+                if "/api/accounts/password/verify" in url:
+                    return FakeResponse(
+                        status_code=200,
+                        json_data={
+                            "continue_url": "http://localhost:1455/auth/callback?code=codex123&state=st&scope=openid",
+                            "page": {"type": "done"},
+                        },
+                    )
+                raise AssertionError(f"unexpected request {method} {url}")
+
+        session = CodexLoginPageRedirectSession()
+        registrar = openai_register.PlatformRegistrar.__new__(openai_register.PlatformRegistrar)
+        registrar.session = session
+        registrar.device_id = "device-1"
+        expected_tokens = {"access_token": "access", "refresh_token": "refresh", "id_token": "id"}
+
+        with (
+            mock.patch.object(openai_register, "exchange_oauth_callback_params", return_value=expected_tokens, create=True),
+            mock.patch.object(openai_register, "build_sentinel_token", return_value="sentinel"),
+            mock.patch.object(openai_register, "step"),
+        ):
+            tokens = registrar._login_and_exchange_tokens(
+                "user@example.com",
+                "Password1!",
+                {},
+                1,
+                profile=openai_register.codex_oauth_profile,
+            )
+
+        self.assertEqual(tokens, expected_tokens)
+        accounts_login_call_index = next(index for index, (_, url, _) in enumerate(session.calls) if "/api/accounts/login" in url)
+        password_verify_call_index = next(index for index, (_, url, _) in enumerate(session.calls) if "/api/accounts/password/verify" in url)
+        self.assertLess(accounts_login_call_index, password_verify_call_index)
+        self.assertFalse(any("/log-in/password" in url for _, url, _ in session.calls))
+
+    def test_codex_add_phone_uses_hero_sms_reuse_send_and_validate(self):
+        class AddPhoneSession:
+            def __init__(self):
+                self.calls = []
+
+            def request(self, method, url, **kwargs):
+                self.calls.append((method.upper(), url, kwargs))
+                if "/api/accounts/add-phone/send" in url:
+                    self.sent_phone = kwargs.get("json", {}).get("phone_number")
+                    return FakeResponse(
+                        status_code=200,
+                        json_data={"continue_url": "https://auth.openai.com/phone-verification"},
+                        url=url,
+                    )
+                if url == "https://auth.openai.com/phone-verification":
+                    return FakeResponse(status_code=200, url=url)
+                if "/api/accounts/phone-otp/validate" in url:
+                    self.validated_code = kwargs.get("json", {}).get("code")
+                    return FakeResponse(
+                        status_code=200,
+                        json_data={"page": {"type": "sign_in_with_chatgpt_codex_consent"}},
+                        url=url,
+                    )
+                raise AssertionError(f"unexpected request {method} {url}")
+
+        class FakeHeroClient:
+            instances = []
+
+            def __init__(self, *args, **kwargs):
+                self.finished = []
+                FakeHeroClient.instances.append(self)
+
+            def get_status(self, activation_id):
+                return "STATUS_WAIT_CODE"
+
+            def poll_code(self, activation_id, *, timeout):
+                self.polled = (activation_id, timeout)
+                return "123456"
+
+            def finish(self, activation_id):
+                self.finished.append(activation_id)
+
+        session = AddPhoneSession()
+        registrar = openai_register.PlatformRegistrar.__new__(openai_register.PlatformRegistrar)
+        registrar.session = session
+        registrar.device_id = "device-1"
+        hero_config = {
+            "enabled": True,
+            "api_key": "hero-key",
+            "wait_timeout": 120,
+            "poll_interval": 1,
+            "reuse_activation_id": "387542069",
+            "reuse_phone": "84816062294",
+        }
+        activation = mock.Mock(activation_id="387542069", phone="84816062294")
+
+        with (
+            mock.patch.dict(openai_register.config, {"hero_sms": hero_config}),
+            mock.patch.object(openai_register, "resolve_activation", return_value=activation),
+            mock.patch.object(openai_register, "HeroSmsClient", FakeHeroClient),
+            mock.patch.object(openai_register, "step"),
+        ):
+            continue_url = registrar._handle_codex_add_phone("https://auth.openai.com/add-phone", 1)
+
+        self.assertEqual(continue_url, "https://auth.openai.com/sign-in-with-chatgpt/codex/consent")
+        self.assertEqual(session.sent_phone, "+84816062294")
+        self.assertEqual(session.validated_code, "123456")
+        self.assertEqual(FakeHeroClient.instances[0].polled, ("387542069", 120.0))
+        self.assertEqual(FakeHeroClient.instances[0].finished, ["387542069"])
+
+    def test_codex_add_phone_rejects_cancelled_hero_sms_activation_before_send(self):
+        class NoOpenAISession:
+            def request(self, method, url, **kwargs):
+                raise AssertionError("OpenAI add_phone send should not run for cancelled HeroSMS activation")
+
+        class CancelledHeroClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def get_status(self, activation_id):
+                return "STATUS_CANCEL"
+
+            def close(self):
+                pass
+
+        registrar = openai_register.PlatformRegistrar.__new__(openai_register.PlatformRegistrar)
+        registrar.session = NoOpenAISession()
+        registrar.device_id = "device-1"
+        hero_config = {
+            "enabled": True,
+            "api_key": "hero-key",
+            "wait_timeout": 120,
+            "poll_interval": 1,
+            "reuse_activation_id": "387542069",
+            "reuse_phone": "84816062294",
+        }
+        activation = mock.Mock(activation_id="387542069", phone="84816062294")
+
+        with (
+            mock.patch.dict(openai_register.config, {"hero_sms": hero_config}),
+            mock.patch.object(openai_register, "resolve_activation", return_value=activation),
+            mock.patch.object(openai_register, "HeroSmsClient", CancelledHeroClient),
+            mock.patch.object(openai_register, "step"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "HeroSMS activation 不可用"):
+                registrar._handle_codex_add_phone("https://auth.openai.com/add-phone", 1)
+
     def test_register_can_use_codex_oauth_profile_without_changing_default(self):
         registrar = openai_register.PlatformRegistrar.__new__(openai_register.PlatformRegistrar)
         registrar.session = mock.Mock()

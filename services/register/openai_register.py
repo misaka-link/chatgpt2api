@@ -12,7 +12,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import parse_qs, urlencode, urljoin, urlparse
 
 import requests
 import urllib3
@@ -20,6 +20,7 @@ from curl_cffi import requests as curl_requests
 from requests.adapters import HTTPAdapter
 
 from services.account_service import account_service
+from services.hero_sms_service import HeroSmsClient, resolve_activation
 from services.register import domain_reputation, mail_provider
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -617,6 +618,30 @@ def _response_error_detail(resp) -> str:
     return f", body={text[:800]}" if text else ""
 
 
+def _e164_phone(phone: str) -> str:
+    digits = "".join(ch for ch in str(phone or "") if ch.isdigit())
+    if not digits:
+        raise RuntimeError("HeroSMS 未返回手机号")
+    return f"+{digits}"
+
+
+def _continue_url_from_auth_payload(payload: dict) -> str:
+    continue_url = str(payload.get("continue_url") or "").strip()
+    if continue_url:
+        return continue_url
+    page = payload.get("page") or {}
+    page_type = str(page.get("type") or "").strip()
+    page_paths = {
+        "phone_otp_verification": "/phone-verification",
+        "sign_in_with_chatgpt_consent": "/sign-in-with-chatgpt/consent",
+        "sign_in_with_chatgpt_codex_consent": "/sign-in-with-chatgpt/codex/consent",
+        "sign_in_with_chatgpt_codex_org": "/sign-in-with-chatgpt/codex/organization",
+        "workspace": "/workspace",
+    }
+    path = page_paths.get(page_type)
+    return f"{auth_base}{path}" if path else ""
+
+
 def exchange_oauth_callback_params(code_verifier: str, callback_params: dict[str, str], profile: dict | None = None) -> dict | None:
     code = str(callback_params.get("code") or "").strip()
     if not code:
@@ -686,6 +711,114 @@ class PlatformRegistrar:
         headers["oai-device-id"] = self.device_id
         headers.update(_make_trace_headers())
         return headers
+
+    def _follow_auth_internal_redirects(self, resp, index: int):
+        current = resp
+        for _ in range(5):
+            callback_params = extract_oauth_callback_params_from_response(current)
+            if callback_params:
+                return current, callback_params
+            location = str((getattr(current, "headers", {}) or {}).get("Location") or "").strip()
+            if getattr(current, "status_code", None) not in (301, 302, 303, 307, 308) or not location:
+                return current, None
+            next_url = urljoin(str(getattr(current, "url", "") or auth_base), location)
+            next_parsed = urlparse(next_url)
+            if next_parsed.scheme not in ("http", "https") or next_parsed.netloc != "auth.openai.com":
+                return current, None
+            if next_parsed.path not in ("/api/oauth/oauth2/auth", "/api/accounts/login"):
+                return current, None
+            step(index, f"跟随 auth 内部跳转 {next_parsed.path}")
+            next_resp, error = request_with_local_retry(
+                self.session,
+                "get",
+                next_url,
+                headers=self._navigate_headers(str(getattr(current, "url", "") or auth_base)),
+                allow_redirects=False,
+                verify=False,
+                timeout=20,
+                retry_statuses=(429, 500, 502, 503, 504),
+            )
+            if next_resp is None:
+                raise RuntimeError(error or "auth_internal_redirect_failed")
+            current = next_resp
+        return current, extract_oauth_callback_params_from_response(current)
+
+    def _handle_codex_add_phone(self, continue_url: str, index: int) -> str:
+        hero_sms = config.get("hero_sms") if isinstance(config.get("hero_sms"), dict) else {}
+        if not hero_sms.get("enabled"):
+            raise RuntimeError("Codex OAuth 需要 add_phone，但 HeroSMS 未启用")
+        api_key = str(hero_sms.get("api_key") or "").strip()
+        if not api_key:
+            raise RuntimeError("Codex OAuth 需要 add_phone，但 HeroSMS API Key 为空")
+
+        activation = resolve_activation(hero_sms)
+        phone_number = _e164_phone(str(activation.phone or ""))
+        step(index, f"add_phone 使用 HeroSMS activation={activation.activation_id}, phone=***{phone_number[-4:]}")
+
+        client = HeroSmsClient(
+            api_key,
+            poll_interval=float(hero_sms.get("poll_interval") or 5),
+        )
+        try:
+            activation_status = client.get_status(str(activation.activation_id))
+            if activation_status not in {"STATUS_WAIT_CODE", "STATUS_WAIT_RETRY", "STATUS_WAIT_RESEND"}:
+                raise RuntimeError(f"HeroSMS activation 不可用: {activation_status}")
+            send_resp, error = request_with_local_retry(
+                self.session,
+                "post",
+                f"{auth_base}/api/accounts/add-phone/send",
+                json={"phone_number": phone_number},
+                headers=self._json_headers(continue_url or f"{auth_base}/add-phone"),
+                verify=False,
+                timeout=20,
+                retry_statuses=(429, 500, 502, 503, 504),
+            )
+            if send_resp is None or send_resp.status_code != 200:
+                raise RuntimeError(error or f"add_phone_send_http_{getattr(send_resp, 'status_code', 'unknown')}{_response_error_detail(send_resp)}")
+            phone_verify_url = _continue_url_from_auth_payload(_response_json(send_resp)) or f"{auth_base}/phone-verification"
+            step(index, "add_phone 发送验证码完成")
+
+            nav_resp, error = request_with_local_retry(
+                self.session,
+                "get",
+                phone_verify_url,
+                headers=self._navigate_headers(continue_url or f"{auth_base}/add-phone"),
+                allow_redirects=True,
+                verify=False,
+                timeout=20,
+                retry_statuses=(429, 500, 502, 503, 504),
+            )
+            if nav_resp is None or getattr(nav_resp, "status_code", 0) >= 400:
+                raise RuntimeError(error or f"phone_verification_page_http_{getattr(nav_resp, 'status_code', 'unknown')}{_response_error_detail(nav_resp)}")
+
+            code = client.poll_code(str(activation.activation_id), timeout=float(hero_sms.get("wait_timeout") or 1200))
+            step(index, f"HeroSMS 收到 add_phone 验证码: {code}")
+            verify_resp, error = request_with_local_retry(
+                self.session,
+                "post",
+                f"{auth_base}/api/accounts/phone-otp/validate",
+                json={"code": code},
+                headers=self._json_headers(phone_verify_url),
+                verify=False,
+                timeout=20,
+                retry_statuses=(429, 500, 502, 503, 504),
+            )
+            if verify_resp is None or verify_resp.status_code != 200:
+                raise RuntimeError(error or f"phone_otp_validate_http_{getattr(verify_resp, 'status_code', 'unknown')}{_response_error_detail(verify_resp)}")
+            next_url = _continue_url_from_auth_payload(_response_json(verify_resp))
+            if not next_url:
+                raise RuntimeError(f"phone_otp_validate_missing_continue{_response_error_detail(verify_resp)}")
+            try:
+                client.finish(str(activation.activation_id))
+            except Exception as exc:
+                step(index, f"HeroSMS finish 失败: {exc}", "yellow")
+            step(index, "add_phone 验证完成")
+            return next_url
+        finally:
+            try:
+                client.close()
+            except Exception:
+                pass
 
     def _platform_authorize(self, email: str, index: int) -> None:
         step(index, "开始 platform authorize")
@@ -765,7 +898,10 @@ class PlatformRegistrar:
         if resp is None:
             raise RuntimeError(error or "platform_login_authorize_failed")
         step(index, "登录 authorize 完成")
-        callback_params = extract_oauth_callback_params_from_response(resp)
+        if profile.get("kind") == "codex":
+            resp, callback_params = self._follow_auth_internal_redirects(resp, index)
+        else:
+            callback_params = extract_oauth_callback_params_from_response(resp)
         if callback_params:
             tokens = exchange_oauth_callback_params(code_verifier, callback_params, profile=profile)
             if tokens:
@@ -781,6 +917,46 @@ class PlatformRegistrar:
         payload = _response_json(resp)
         continue_url = str(payload.get("continue_url") or "").strip()
         page_type = str(((payload.get("page") or {}).get("type")) or "")
+        if profile.get("kind") == "codex":
+            parsed_continue = urlparse(continue_url) if continue_url else None
+            continue_hint = (
+                f"{parsed_continue.scheme}://{parsed_continue.netloc}{parsed_continue.path}"
+                if parsed_continue and parsed_continue.scheme and parsed_continue.netloc
+                else continue_url[:160]
+            )
+            step(index, f"Codex password_verify 返回 page_type={page_type or '-'}, continue_url={continue_hint or '-'}")
+            if page_type == "add_phone" and continue_url:
+                try:
+                    debug_dir = base_dir.parents[1] / "data" / "debug" / "add_phone_runtime"
+                    debug_dir.mkdir(parents=True, exist_ok=True)
+                    add_phone_resp, _ = request_with_local_retry(
+                        self.session,
+                        "get",
+                        continue_url,
+                        headers=self._navigate_headers(continue_url),
+                        allow_redirects=True,
+                        verify=False,
+                        timeout=20,
+                        retry_statuses=(429, 500, 502, 503, 504),
+                    )
+                    if add_phone_resp is not None:
+                        debug_dir.joinpath("add_phone.html").write_text(str(getattr(add_phone_resp, "text", "") or ""), encoding="utf-8")
+                        debug_dir.joinpath("add_phone_meta.json").write_text(
+                            json.dumps(
+                                {
+                                    "status_code": getattr(add_phone_resp, "status_code", None),
+                                    "url": str(getattr(add_phone_resp, "url", "") or ""),
+                                    "content_type": str((getattr(add_phone_resp, "headers", {}) or {}).get("content-type") or ""),
+                                },
+                                ensure_ascii=False,
+                                indent=2,
+                            ),
+                            encoding="utf-8",
+                        )
+                except Exception as exc:
+                    step(index, f"add_phone 页面诊断失败: {exc}", "yellow")
+                continue_url = self._handle_codex_add_phone(continue_url, index)
+                page_type = ""
         if page_type == "email_otp_verification" or "email-verification" in continue_url or "email-otp" in continue_url:
             step(index, "独立登录需要邮箱验证码")
             code = wait_for_code(mailbox)
@@ -799,7 +975,7 @@ class PlatformRegistrar:
             continue_url = f"{auth_base}/sign-in-with-chatgpt/codex/consent"
         tokens = exchange_platform_tokens(self.session, self.device_id, code_verifier, continue_url, profile=profile)
         if not tokens:
-            raise RuntimeError("token换取失败")
+            raise RuntimeError(f"token换取失败: page_type={page_type or '-'}, continue_url={continue_url[:240] or '-'}")
         step(index, "token 换取完成")
         return tokens
 
