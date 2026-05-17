@@ -52,6 +52,22 @@ class CPAPushServiceTests(unittest.TestCase):
         )
         mime.close.assert_called_once()
 
+    def test_local_cpa_urls_bypass_global_proxy(self):
+        from services.proxy_service import proxy_settings
+
+        with mock.patch("services.proxy_service.config.get_proxy_settings", return_value="http://proxy.local:7890"):
+            kwargs = proxy_settings.build_session_kwargs_for_url("http://host.docker.internal:8317/v0/management/auth-files", verify=True)
+
+        self.assertEqual(kwargs, {"verify": True})
+
+    def test_remote_cpa_urls_keep_global_proxy(self):
+        from services.proxy_service import proxy_settings
+
+        with mock.patch("services.proxy_service.config.get_proxy_settings", return_value="http://proxy.local:7890"):
+            kwargs = proxy_settings.build_session_kwargs_for_url("https://cpa.example.test/v0/management/auth-files", verify=True)
+
+        self.assertEqual(kwargs, {"verify": True, "proxy": "http://proxy.local:7890"})
+
 
 if __name__ == "__main__":
     unittest.main()

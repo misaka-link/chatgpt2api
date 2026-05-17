@@ -156,7 +156,7 @@ def list_remote_files(pool: dict) -> list[dict]:
         return []
 
     url = f"{base_url.rstrip('/')}/v0/management/auth-files"
-    session = Session(**proxy_settings.build_session_kwargs(verify=True))
+    session = Session(**proxy_settings.build_session_kwargs_for_url(url, verify=True))
     try:
         response = session.get(url, headers=_management_headers(secret_key), timeout=30)
         if not response.ok:

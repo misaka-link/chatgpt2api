@@ -34,6 +34,12 @@ class FakeSession:
 
 
 class HeroSmsServiceTests(unittest.TestCase):
+    def setUp(self):
+        from services import phone_broker_service
+
+        phone_broker_service._country_cursor = 0
+        phone_broker_service._runtime_country_blacklist.clear()
+
     def test_get_number_uses_sms_activate_compatible_params_and_parses_access_number(self):
         from services.hero_sms_service import HeroSmsClient
 

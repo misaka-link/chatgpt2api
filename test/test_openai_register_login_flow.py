@@ -134,6 +134,47 @@ class OpenAIRegisterLoginFlowTests(unittest.TestCase):
         self.assertEqual(params, {"code": "abc123", "state": "st", "scope": "openid"})
         self.assertEqual(session.calls, 2)
 
+    def test_consent_session_uses_session_dump_workspace_continue_url(self):
+        class ConsentSession:
+            def __init__(self):
+                self.calls = []
+
+            def request(self, method, url, **kwargs):
+                self.calls.append((method.upper(), url, kwargs))
+                if url == "https://auth.openai.com/sign-in-with-chatgpt/codex/consent":
+                    return FakeResponse(status_code=200, url=url)
+                if url == "https://auth.openai.com/api/accounts/client_auth_session_dump":
+                    return FakeResponse(
+                        status_code=200,
+                        url=url,
+                        json_data={"client_auth_session": {"workspaces": [{"id": "ws-1"}]}},
+                    )
+                if url == "https://auth.openai.com/api/accounts/workspace/select":
+                    return FakeResponse(
+                        status_code=200,
+                        url=url,
+                        json_data={"continue_url": "https://auth.openai.com/sign-in-with-chatgpt/codex/organization"},
+                    )
+                if url == "https://auth.openai.com/sign-in-with-chatgpt/codex/organization":
+                    return FakeResponse(
+                        status_code=302,
+                        url=url,
+                        headers={"Location": "http://localhost:1455/auth/callback?code=codex123&state=st&scope=openid"},
+                    )
+                raise AssertionError(f"unexpected request {method} {url}")
+
+        session = ConsentSession()
+
+        params = openai_register.extract_oauth_callback_params_from_consent_session(
+            session,
+            "https://auth.openai.com/sign-in-with-chatgpt/codex/consent",
+            "device-1",
+        )
+
+        self.assertEqual(params, {"code": "codex123", "state": "st", "scope": "openid"})
+        self.assertIn(("GET", "https://auth.openai.com/api/accounts/client_auth_session_dump"), [(m, u) for m, u, _ in session.calls])
+        self.assertIn(("POST", "https://auth.openai.com/api/accounts/workspace/select"), [(m, u) for m, u, _ in session.calls])
+
     def test_exchange_oauth_callback_params_retries_transient_token_failure(self):
         class TokenSession:
             def __init__(self):
@@ -236,6 +277,7 @@ class OpenAIRegisterLoginFlowTests(unittest.TestCase):
         self.assertIn("client_id=app_EMoamEEZ73f0CkXaXp7hrann", authorize_calls[0][1])
         self.assertIn("codex_cli_simplified_flow=true", authorize_calls[0][1])
         self.assertIn("id_token_add_organizations=true", authorize_calls[0][1])
+        self.assertIn("originator=codex_cli_rs", authorize_calls[0][1])
         self.assertIn("redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback", authorize_calls[0][1])
         exchange.assert_called_once()
 
@@ -677,6 +719,83 @@ class OpenAIRegisterLoginFlowTests(unittest.TestCase):
                 registrar._handle_codex_add_phone("https://auth.openai.com/add-phone", 1)
 
         self.assertEqual(HeroClientWithCancel.instances[0].cancelled, ["387677529"])
+
+    def test_codex_add_phone_retries_new_number_when_phone_is_in_use(self):
+        class RetrySendSession:
+            def __init__(self):
+                self.sent_phones = []
+
+            def request(self, method, url, **kwargs):
+                if "/api/accounts/add-phone/send" in url:
+                    phone = kwargs.get("json", {}).get("phone_number")
+                    self.sent_phones.append(phone)
+                    if len(self.sent_phones) == 1:
+                        return FakeResponse(
+                            status_code=400,
+                            json_data={"error": {"code": "phone_number_in_use"}},
+                            url=url,
+                        )
+                    return FakeResponse(
+                        status_code=200,
+                        json_data={"continue_url": "https://auth.openai.com/phone-verification"},
+                        url=url,
+                    )
+                if url == "https://auth.openai.com/phone-verification":
+                    return FakeResponse(status_code=200, url=url)
+                if "/api/accounts/phone-otp/validate" in url:
+                    return FakeResponse(
+                        status_code=200,
+                        json_data={"page": {"type": "sign_in_with_chatgpt_codex_consent"}},
+                        url=url,
+                    )
+                raise AssertionError(f"unexpected request {method} {url}")
+
+        class HeroClientWithCancelAndCode:
+            instances = []
+
+            def __init__(self, *args, **kwargs):
+                self.cancelled = []
+                HeroClientWithCancelAndCode.instances.append(self)
+
+            def get_status(self, activation_id):
+                return "STATUS_WAIT_CODE"
+
+            def poll_code(self, activation_id, *, timeout):
+                return "123456"
+
+            def cancel(self, activation_id):
+                self.cancelled.append(activation_id)
+                return "ACCESS_CANCEL"
+
+            def finish(self, activation_id):
+                self.finished = activation_id
+
+            def close(self):
+                pass
+
+        session = RetrySendSession()
+        registrar = openai_register.PlatformRegistrar.__new__(openai_register.PlatformRegistrar)
+        registrar.session = session
+        registrar.device_id = "device-1"
+        hero_config = {"enabled": True, "api_key": "hero-key", "wait_timeout": 30, "poll_interval": 1}
+        activations = [
+            mock.Mock(activation_id="old", phone="10001", raw="ACCESS_NUMBER:old:10001", country=6),
+            mock.Mock(activation_id="new", phone="10002", raw="ACCESS_NUMBER:new:10002", country=117),
+        ]
+
+        with (
+            mock.patch.dict(openai_register.config, {"hero_sms": hero_config}),
+            mock.patch.object(openai_register, "resolve_activation", side_effect=activations),
+            mock.patch.object(openai_register, "HeroSmsClient", HeroClientWithCancelAndCode),
+            mock.patch.object(openai_register, "mark_country_bad") as mark_bad,
+            mock.patch.object(openai_register, "step"),
+        ):
+            continue_url = registrar._handle_codex_add_phone("https://auth.openai.com/add-phone", 1)
+
+        self.assertEqual(continue_url, "https://auth.openai.com/sign-in-with-chatgpt/codex/consent")
+        self.assertEqual(session.sent_phones, ["+10001", "+10002"])
+        self.assertEqual(HeroClientWithCancelAndCode.instances[0].cancelled, ["old"])
+        mark_bad.assert_called_with(6, "add_phone_send_failed:phone_number_in_use")
 
     def test_codex_add_phone_caps_wait_timeout_and_cancels_when_sms_never_arrives(self):
         class SendOkSession:

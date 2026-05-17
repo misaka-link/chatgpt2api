@@ -102,7 +102,7 @@ class PhoneBrokerServiceTests(unittest.TestCase):
             "117": {"virtual4": {"cost": 0.08, "count": 2}},
             "31": {"any": {"cost": 0.12, "count": 0}},
         }
-        fake_client.get_number.return_value = HeroSmsActivation("9", "1009", "ACCESS_NUMBER:9:1009", country=117, operator="virtual4")
+        fake_client.get_number.return_value = HeroSmsActivation("9", "1009", "ACCESS_NUMBER:9:1009", country=117, operator="any")
         events: list[str] = []
 
         with mock.patch("services.phone_broker_service.HeroSmsClient", return_value=fake_client):
@@ -120,7 +120,7 @@ class PhoneBrokerServiceTests(unittest.TestCase):
 
         self.assertEqual(activation.activation_id, "9")
         fake_client.get_prices.assert_called_once_with(service="dr")
-        fake_client.get_number.assert_called_once_with(service="dr", country=117, operator="virtual4", max_price=0.1)
+        fake_client.get_number.assert_called_once_with(service="dr", country=117, operator="any", max_price=0.1)
         self.assertTrue(any("价格过滤命中" in event for event in events))
 
     def test_reserve_min_price_refuses_to_blind_buy_when_no_priced_candidate(self) -> None:

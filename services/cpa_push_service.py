@@ -25,7 +25,8 @@ def upload_auth_file(pool: dict, filename: str, content: bytes, *, session: Any 
         raise ValueError("auth file filename and content are required")
 
     owned_session = session is None
-    session = session or Session(**proxy_settings.build_session_kwargs(verify=True))
+    upload_url = f"{base_url.rstrip('/')}/v0/management/auth-files"
+    session = session or Session(**proxy_settings.build_session_kwargs_for_url(upload_url, verify=True))
     multipart = CurlMime()
     try:
         multipart.addpart(
@@ -35,7 +36,7 @@ def upload_auth_file(pool: dict, filename: str, content: bytes, *, session: Any 
             data=content,
         )
         response = session.post(
-            f"{base_url.rstrip('/')}/v0/management/auth-files",
+            upload_url,
             headers=_management_headers(secret_key),
             multipart=multipart,
             timeout=30,

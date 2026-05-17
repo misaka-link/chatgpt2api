@@ -144,7 +144,7 @@ def _priced_candidates(
             continue
         for raw_operator, info in operators.items():
             op = str(raw_operator or "").strip() or "any"
-            if wanted_operator != "any" and op != wanted_operator:
+            if wanted_operator != "any" and op not in {wanted_operator, OPENAI_SERVICE_CODE}:
                 continue
             if not isinstance(info, dict):
                 continue
@@ -153,7 +153,7 @@ def _priced_candidates(
             if price is None or count <= 0:
                 continue
             if min_price <= price <= max_price:
-                candidates.append(_PhoneCandidate(country=country, operator=op, price=price, count=count))
+                candidates.append(_PhoneCandidate(country=country, operator=wanted_operator, price=price, count=count))
     candidates.sort(key=lambda item: (order[item.country], item.price if item.price is not None else 999, -int(item.count or 0)))
     return candidates
 

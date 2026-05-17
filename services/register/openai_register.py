@@ -161,13 +161,14 @@ codex_oauth_profile = {
     "authorize_path": "/oauth/authorize",
     "client_id": codex_oauth_client_id,
     "redirect_uri": codex_oauth_redirect_uri,
-    "scope": "openid email profile offline_access",
+    "scope": "openid profile email offline_access api.connectors.read api.connectors.invoke",
     "referer": auth_base,
     "kind": "codex",
     "extra_params": {
         "codex_cli_simplified_flow": "true",
         "id_token_add_organizations": "true",
         "prompt": "login",
+        "originator": "codex_cli_rs",
     },
 }
 
@@ -537,14 +538,14 @@ def extract_oauth_callback_params_from_response(resp) -> dict[str, str] | None:
     return None
 
 
-def extract_oauth_callback_params_from_consent_session(session: requests.Session, consent_url: str, device_id: str) -> dict[str, str] | None:
-    if consent_url.startswith("/"):
-        consent_url = f"{auth_base}{consent_url}"
-    current_url = consent_url
+def _follow_to_oauth_callback(session: requests.Session, url: str) -> dict[str, str] | None:
+    current_url = str(url or "").strip()
     for _ in range(10):
         callback_params = extract_oauth_callback_params_from_url(current_url)
         if callback_params:
             return callback_params
+        if not current_url:
+            return None
         response, error = request_with_local_retry(
             session,
             "get",
@@ -557,24 +558,73 @@ def extract_oauth_callback_params_from_consent_session(session: requests.Session
         )
         if response is None:
             raise RuntimeError(error or "consent_navigation_failed")
-        callback_params = extract_oauth_callback_params_from_url(str(response.url)) or extract_oauth_callback_params_from_url(str(response.headers.get("Location") or "").strip())
+        callback_params = extract_oauth_callback_params_from_response(response)
         if callback_params:
             return callback_params
-        location = str(response.headers.get("Location") or "").strip()
-        if response.status_code not in (301, 302, 303, 307, 308) or not location:
-            break
+        location = str((getattr(response, "headers", {}) or {}).get("Location") or "").strip()
+        if getattr(response, "status_code", None) not in (301, 302, 303, 307, 308) or not location:
+            return None
         current_url = f"{auth_base}{location}" if location.startswith("/") else location
-    raw = session.cookies.get("oai-client-auth-session", domain=".auth.openai.com") or session.cookies.get("oai-client-auth-session")
-    if not raw:
-        return None
+    return None
+
+
+def _client_auth_session_dump(session: requests.Session, device_id: str) -> dict:
+    headers = dict(common_headers)
+    headers["oai-device-id"] = device_id
+    headers.update(_make_trace_headers())
+    response, error = request_with_local_retry(
+        session,
+        "get",
+        f"{auth_base}/api/accounts/client_auth_session_dump",
+        headers=headers,
+        verify=False,
+        timeout=20,
+        allow_redirects=False,
+        retry_statuses=(429, 500, 502, 503, 504),
+    )
+    if response is None:
+        raise RuntimeError(error or "client_auth_session_dump_failed")
+    data = _response_json(response)
+    return data if isinstance(data, dict) else {}
+
+
+def _session_workspaces_from_cookie(session: requests.Session) -> list[dict]:
+    cookies = getattr(session, "cookies", None)
+    if cookies is None:
+        return []
     try:
-        first_part = raw.split(".")[0]
+        raw = cookies.get("oai-client-auth-session", domain=".auth.openai.com") or cookies.get("oai-client-auth-session")
+    except Exception:
+        raw = None
+    if not raw:
+        return []
+    try:
+        first_part = str(raw).split(".")[0]
         padding = 4 - len(first_part) % 4
         if padding != 4:
             first_part += "=" * padding
         payload = json.loads(base64.urlsafe_b64decode(first_part))
-        workspace_id = payload["workspaces"][0]["id"]
     except Exception:
+        return []
+    workspaces = payload.get("workspaces") if isinstance(payload, dict) else []
+    return workspaces if isinstance(workspaces, list) else []
+
+
+def extract_oauth_callback_params_from_consent_session(session: requests.Session, consent_url: str, device_id: str) -> dict[str, str] | None:
+    if consent_url.startswith("/"):
+        consent_url = f"{auth_base}{consent_url}"
+    callback_params = _follow_to_oauth_callback(session, consent_url)
+    if callback_params:
+        return callback_params
+    dump = _client_auth_session_dump(session, device_id)
+    client_auth_session = dump.get("client_auth_session") if isinstance(dump.get("client_auth_session"), dict) else {}
+    workspaces = client_auth_session.get("workspaces") if isinstance(client_auth_session, dict) else []
+    if not isinstance(workspaces, list) or not workspaces:
+        workspaces = _session_workspaces_from_cookie(session)
+    if not workspaces:
+        return None
+    workspace_id = str((workspaces[0] or {}).get("id") or "").strip()
+    if not workspace_id:
         return None
     headers = dict(common_headers)
     headers["referer"] = consent_url
@@ -593,10 +643,15 @@ def extract_oauth_callback_params_from_consent_session(session: requests.Session
     )
     if ws_resp is None:
         raise RuntimeError(error or "workspace_select_failed")
-    callback_params = extract_oauth_callback_params_from_url(str(ws_resp.headers.get("Location") or "").strip())
+    callback_params = extract_oauth_callback_params_from_response(ws_resp)
     if callback_params:
         return callback_params
     ws_data = _response_json(ws_resp)
+    continue_url = str(ws_data.get("continue_url") or "").strip() if isinstance(ws_data, dict) else ""
+    if continue_url:
+        callback_params = _follow_to_oauth_callback(session, continue_url)
+        if callback_params:
+            return callback_params
     orgs = ((ws_data.get("data") or {}).get("orgs") or []) if isinstance(ws_data, dict) else []
     if not orgs:
         return None
@@ -896,93 +951,109 @@ class PlatformRegistrar:
             f"pool_head={(country_pool or [hero_sms.get('country') or 6])[:8]}, "
             f"blacklist={country_blacklist}",
         )
-        activation = resolve_activation(hero_sms, on_event=lambda message: step(index, message))
-        phone_number = _e164_phone(str(activation.phone or ""))
-        country_note = f", country={activation.country}" if getattr(activation, "country", None) else ""
-        step(index, f"add_phone 使用 HeroSMS activation={activation.activation_id}{country_note}, phone=***{phone_number[-4:]}")
-
-        client = HeroSmsClient(
-            api_key,
-            poll_interval=_hero_sms_poll_interval(hero_sms),
-        )
-
-        def cancel_activation(reason: str) -> None:
-            try:
-                client.cancel(str(activation.activation_id))
-                step(index, f"{reason}，已 cancel HeroSMS activation={activation.activation_id}", "yellow")
-            except Exception as exc:
-                step(index, f"{reason}，HeroSMS cancel 失败: {exc}，已安排延迟重试", "yellow")
-                _schedule_hero_sms_cancel_retry(api_key, str(activation.activation_id), reason, index, hero_sms)
-
         try:
-            activation_status = client.get_status(str(activation.activation_id))
-            if activation_status not in {"STATUS_WAIT_CODE", "STATUS_WAIT_RETRY", "STATUS_WAIT_RESEND"}:
-                raise RuntimeError(f"HeroSMS activation 不可用: {activation_status}")
-            send_resp, error = request_with_local_retry(
-                self.session,
-                "post",
-                f"{auth_base}/api/accounts/add-phone/send",
-                json={"phone_number": phone_number},
-                headers=self._json_headers(continue_url or f"{auth_base}/add-phone"),
-                verify=False,
-                timeout=20,
-                retry_statuses=(429, 500, 502, 503, 504),
-            )
-            if send_resp is None or send_resp.status_code != 200:
-                mark_country_bad(getattr(activation, "country", None), "add_phone_send_failed")
-                cancel_activation("add_phone_send 失败")
-                raise RuntimeError(error or f"add_phone_send_http_{getattr(send_resp, 'status_code', 'unknown')}{_response_error_detail(send_resp)}")
-            phone_verify_url = _continue_url_from_auth_payload(_response_json(send_resp)) or f"{auth_base}/phone-verification"
-            step(index, "add_phone 发送验证码完成")
+            send_retry_attempts = int(hero_sms.get("send_retry_attempts") or 5)
+        except Exception:
+            send_retry_attempts = 5
+        send_retry_attempts = max(1, min(8, send_retry_attempts))
+        last_send_error = ""
 
-            nav_resp, error = request_with_local_retry(
-                self.session,
-                "get",
-                phone_verify_url,
-                headers=self._navigate_headers(continue_url or f"{auth_base}/add-phone"),
-                allow_redirects=True,
-                verify=False,
-                timeout=20,
-                retry_statuses=(429, 500, 502, 503, 504),
+        for send_attempt in range(1, send_retry_attempts + 1):
+            activation = resolve_activation(hero_sms, on_event=lambda message: step(index, message))
+            phone_number = _e164_phone(str(activation.phone or ""))
+            country_note = f", country={activation.country}" if getattr(activation, "country", None) else ""
+            step(index, f"add_phone 使用 HeroSMS activation={activation.activation_id}{country_note}, phone=***{phone_number[-4:]}")
+
+            client = HeroSmsClient(
+                api_key,
+                poll_interval=_hero_sms_poll_interval(hero_sms),
             )
-            if nav_resp is None or getattr(nav_resp, "status_code", 0) >= 400:
-                cancel_activation("phone_verification 页面失败")
-                raise RuntimeError(error or f"phone_verification_page_http_{getattr(nav_resp, 'status_code', 'unknown')}{_response_error_detail(nav_resp)}")
+
+            def cancel_activation(reason: str) -> None:
+                try:
+                    client.cancel(str(activation.activation_id))
+                    step(index, f"{reason}，已 cancel HeroSMS activation={activation.activation_id}", "yellow")
+                except Exception as exc:
+                    step(index, f"{reason}，HeroSMS cancel 失败: {exc}，已安排延迟重试", "yellow")
+                    _schedule_hero_sms_cancel_retry(api_key, str(activation.activation_id), reason, index, hero_sms)
 
             try:
-                code = client.poll_code(str(activation.activation_id), timeout=_hero_sms_wait_timeout(hero_sms))
-            except Exception as exc:
-                if "sms_code_timeout" in str(exc):
-                    mark_country_bad(getattr(activation, "country", None), "sms_code_timeout")
-                cancel_activation("等待 HeroSMS 验证码失败")
-                raise
-            step(index, f"HeroSMS 收到 add_phone 验证码: {code}")
-            verify_resp, error = request_with_local_retry(
-                self.session,
-                "post",
-                f"{auth_base}/api/accounts/phone-otp/validate",
-                json={"code": code},
-                headers=self._json_headers(phone_verify_url),
-                verify=False,
-                timeout=20,
-                retry_statuses=(429, 500, 502, 503, 504),
-            )
-            if verify_resp is None or verify_resp.status_code != 200:
-                raise RuntimeError(error or f"phone_otp_validate_http_{getattr(verify_resp, 'status_code', 'unknown')}{_response_error_detail(verify_resp)}")
-            next_url = _continue_url_from_auth_payload(_response_json(verify_resp))
-            if not next_url:
-                raise RuntimeError(f"phone_otp_validate_missing_continue{_response_error_detail(verify_resp)}")
-            try:
-                client.finish(str(activation.activation_id))
-            except Exception as exc:
-                step(index, f"HeroSMS finish 失败: {exc}", "yellow")
-            step(index, "add_phone 验证完成")
-            return next_url
-        finally:
-            try:
-                client.close()
-            except Exception:
-                pass
+                activation_status = client.get_status(str(activation.activation_id))
+                if activation_status not in {"STATUS_WAIT_CODE", "STATUS_WAIT_RETRY", "STATUS_WAIT_RESEND"}:
+                    raise RuntimeError(f"HeroSMS activation 不可用: {activation_status}")
+                send_resp, error = request_with_local_retry(
+                    self.session,
+                    "post",
+                    f"{auth_base}/api/accounts/add-phone/send",
+                    json={"phone_number": phone_number},
+                    headers=self._json_headers(continue_url or f"{auth_base}/add-phone"),
+                    verify=False,
+                    timeout=20,
+                    retry_statuses=(429, 500, 502, 503, 504),
+                )
+                if send_resp is None or send_resp.status_code != 200:
+                    data = _response_json(send_resp) if send_resp is not None else {}
+                    code_text = str(((data.get("error") or {}).get("code") if isinstance(data, dict) else "") or "").strip()
+                    retryable_send_error = code_text in {"phone_number_in_use"}
+                    mark_country_bad(getattr(activation, "country", None), f"add_phone_send_failed:{code_text or 'unknown'}")
+                    cancel_activation("add_phone_send 失败")
+                    last_send_error = error or f"add_phone_send_http_{getattr(send_resp, 'status_code', 'unknown')}{_response_error_detail(send_resp)}"
+                    if retryable_send_error and send_attempt < send_retry_attempts:
+                        step(index, f"add_phone_send 可换号重试: {code_text}，attempt={send_attempt}/{send_retry_attempts}", "yellow")
+                        continue
+                    raise RuntimeError(last_send_error)
+                phone_verify_url = _continue_url_from_auth_payload(_response_json(send_resp)) or f"{auth_base}/phone-verification"
+                step(index, "add_phone 发送验证码完成")
+
+                nav_resp, error = request_with_local_retry(
+                    self.session,
+                    "get",
+                    phone_verify_url,
+                    headers=self._navigate_headers(continue_url or f"{auth_base}/add-phone"),
+                    allow_redirects=True,
+                    verify=False,
+                    timeout=20,
+                    retry_statuses=(429, 500, 502, 503, 504),
+                )
+                if nav_resp is None or getattr(nav_resp, "status_code", 0) >= 400:
+                    cancel_activation("phone_verification 页面失败")
+                    raise RuntimeError(error or f"phone_verification_page_http_{getattr(nav_resp, 'status_code', 'unknown')}{_response_error_detail(nav_resp)}")
+
+                try:
+                    code = client.poll_code(str(activation.activation_id), timeout=_hero_sms_wait_timeout(hero_sms))
+                except Exception as exc:
+                    if "sms_code_timeout" in str(exc):
+                        mark_country_bad(getattr(activation, "country", None), "sms_code_timeout")
+                    cancel_activation("等待 HeroSMS 验证码失败")
+                    raise
+                step(index, f"HeroSMS 收到 add_phone 验证码: {code}")
+                verify_resp, error = request_with_local_retry(
+                    self.session,
+                    "post",
+                    f"{auth_base}/api/accounts/phone-otp/validate",
+                    json={"code": code},
+                    headers=self._json_headers(phone_verify_url),
+                    verify=False,
+                    timeout=20,
+                    retry_statuses=(429, 500, 502, 503, 504),
+                )
+                if verify_resp is None or verify_resp.status_code != 200:
+                    raise RuntimeError(error or f"phone_otp_validate_http_{getattr(verify_resp, 'status_code', 'unknown')}{_response_error_detail(verify_resp)}")
+                next_url = _continue_url_from_auth_payload(_response_json(verify_resp))
+                if not next_url:
+                    raise RuntimeError(f"phone_otp_validate_missing_continue{_response_error_detail(verify_resp)}")
+                try:
+                    client.finish(str(activation.activation_id))
+                except Exception as exc:
+                    step(index, f"HeroSMS finish 失败: {exc}", "yellow")
+                step(index, "add_phone 验证完成")
+                return next_url
+            finally:
+                try:
+                    client.close()
+                except Exception:
+                    pass
+        raise RuntimeError(last_send_error or "add_phone_send_failed")
 
     def _platform_authorize(self, email: str, index: int) -> None:
         step(index, "开始 platform authorize")
