@@ -12,6 +12,7 @@ export type Account = {
   quota: number;
   image_quota_unknown?: boolean;
   email?: string | null;
+  password?: string | null;
   user_id?: string | null;
   limits_progress?: Array<{
     feature_name?: string;

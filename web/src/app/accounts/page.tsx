@@ -164,6 +164,14 @@ function displayAccountType(account: Account) {
   return account.type || "Free";
 }
 
+function hasRecordedPassword(account: Account) {
+  return Boolean(account.password);
+}
+
+function sortAccountsForDisplay(accounts: Account[]) {
+  return [...accounts].sort((left, right) => Number(hasRecordedPassword(right)) - Number(hasRecordedPassword(left)));
+}
+
 function AccountsPageContent() {
   const didLoadRef = useRef(false);
   const [accounts, setAccounts] = useState<Account[]>([]);
@@ -208,13 +216,13 @@ function AccountsPageContent() {
 
   const filteredAccounts = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
-    return accounts.filter((account) => {
+    return sortAccountsForDisplay(accounts.filter((account) => {
       const searchMatched =
         normalizedQuery.length === 0 || (account.email ?? "").toLowerCase().includes(normalizedQuery);
       const typeMatched = typeFilter === "all" || displayAccountType(account) === typeFilter;
       const statusMatched = statusFilter === "all" || account.status === statusFilter;
       return searchMatched && typeMatched && statusMatched;
-    });
+    }));
   }, [accounts, query, statusFilter, typeFilter]);
 
   const pageCount = Math.max(1, Math.ceil(filteredAccounts.length / Number(pageSize)));
@@ -589,7 +597,7 @@ function AccountsPageContent() {
             </div>
 
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[920px] text-left">
+              <table className="w-full min-w-[1080px] text-left">
                 <thead className="border-b border-stone-100 text-[11px] text-stone-400 uppercase tracking-[0.18em]">
                   <tr>
                     <th className="w-12 px-4 py-3">
@@ -602,6 +610,7 @@ function AccountsPageContent() {
                     <th className="w-28 px-4 py-3">类型</th>
                     <th className="w-24 px-4 py-3">状态</th>
                     <th className="w-56 px-4 py-3">账号信息</th>
+                    <th className="w-48 px-4 py-3">密码</th>
                     <th className="w-24 px-4 py-3">额度</th>
                     <th className="w-40 px-4 py-3">恢复时间</th>
                     <th className="w-18 px-4 py-3">成功</th>
@@ -664,6 +673,29 @@ function AccountsPageContent() {
                         </td>
                         <td className="px-4 py-3">
                           <div className="text-xs leading-5 text-stone-500">{account.email ?? "—"}</div>
+                        </td>
+                        <td className="px-4 py-3">
+                          {account.password ? (
+                            <div className="flex items-center gap-2">
+                              <span className="font-mono text-xs tracking-tight text-stone-700">
+                                {account.password}
+                              </span>
+                              <button
+                                type="button"
+                                className="rounded-lg p-1 text-stone-400 transition hover:bg-stone-100 hover:text-stone-700"
+                                onClick={() => {
+                                  if (!account.password) return;
+                                  void navigator.clipboard.writeText(account.password);
+                                  toast.success("密码已复制");
+                                }}
+                                title="复制密码"
+                              >
+                                <Copy className="size-4" />
+                              </button>
+                            </div>
+                          ) : (
+                            <span className="text-xs text-stone-400">—</span>
+                          )}
                         </td>
                         <td className="px-4 py-3">
                           <Badge variant="info" className="rounded-md">

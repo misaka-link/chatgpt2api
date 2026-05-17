@@ -59,6 +59,7 @@ class AccountService:
         normalized["quota"] = max(0, int(normalized.get("quota") if normalized.get("quota") is not None else 0))
         normalized["image_quota_unknown"] = bool(normalized.get("image_quota_unknown"))
         normalized["email"] = normalized.get("email") or None
+        normalized["password"] = normalized.get("password") or None
         normalized["user_id"] = normalized.get("user_id") or None
         limits_progress = normalized.get("limits_progress")
         normalized["limits_progress"] = limits_progress if isinstance(limits_progress, list) else []
@@ -202,15 +203,36 @@ class AccountService:
                    and (token := item.get("access_token") or "")
             ]
 
-    def add_accounts(self, tokens: list[str]) -> dict:
-        tokens = list(dict.fromkeys(token for token in tokens if token))
-        if not tokens:
+    @staticmethod
+    def _normalize_account_entries(items: list[str | dict[str, Any]]) -> list[dict[str, Any]]:
+        entries: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in items:
+            if isinstance(item, dict):
+                access_token = str(item.get("access_token") or "").strip()
+                if not access_token or access_token in seen:
+                    continue
+                entry = dict(item)
+                entry["access_token"] = access_token
+            else:
+                access_token = str(item or "").strip()
+                if not access_token or access_token in seen:
+                    continue
+                entry = {"access_token": access_token}
+            seen.add(access_token)
+            entries.append(entry)
+        return entries
+
+    def add_accounts(self, tokens: list[str | dict[str, Any]]) -> dict:
+        entries = self._normalize_account_entries(tokens)
+        if not entries:
             return {"added": 0, "skipped": 0, "items": self.list_accounts()}
 
         with self._lock:
             added = 0
             skipped = 0
-            for access_token in tokens:
+            for entry in entries:
+                access_token = entry["access_token"]
                 current = self._accounts.get(access_token)
                 if current is None:
                     added += 1
@@ -220,8 +242,9 @@ class AccountService:
                 account = self._normalize_account(
                     {
                         **current,
+                        **entry,
                         "access_token": access_token,
-                        "type": str(current.get("type") or "free"),
+                        "type": str(entry.get("type") or current.get("type") or "free"),
                     }
                 )
                 if account is not None:
