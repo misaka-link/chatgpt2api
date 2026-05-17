@@ -430,7 +430,7 @@ class OpenAIRegisterLoginFlowTests(unittest.TestCase):
         self.assertEqual(continue_url, "https://auth.openai.com/sign-in-with-chatgpt/codex/consent")
         self.assertEqual(session.sent_phone, "+84816062294")
         self.assertEqual(session.validated_code, "123456")
-        self.assertEqual(FakeHeroClient.instances[0].polled, ("387542069", 120.0))
+        self.assertEqual(FakeHeroClient.instances[0].polled, ("387542069", 30.0))
         self.assertEqual(FakeHeroClient.instances[0].finished, ["387542069"])
 
     def test_codex_add_phone_rejects_cancelled_hero_sms_activation_before_send(self):
@@ -521,6 +521,122 @@ class OpenAIRegisterLoginFlowTests(unittest.TestCase):
                 registrar._handle_codex_add_phone("https://auth.openai.com/add-phone", 1)
 
         self.assertEqual(HeroClientWithCancel.instances[0].cancelled, ["387677529"])
+
+    def test_codex_add_phone_caps_wait_timeout_and_cancels_when_sms_never_arrives(self):
+        class SendOkSession:
+            def request(self, method, url, **kwargs):
+                if "/api/accounts/add-phone/send" in url:
+                    return FakeResponse(
+                        status_code=200,
+                        json_data={"continue_url": "https://auth.openai.com/phone-verification"},
+                        url=url,
+                    )
+                if url == "https://auth.openai.com/phone-verification":
+                    return FakeResponse(status_code=200, url=url)
+                raise AssertionError(f"unexpected request {method} {url}")
+
+        class SlowHeroClient:
+            instances = []
+
+            def __init__(self, *args, **kwargs):
+                self.cancelled = []
+                self.polled = None
+                SlowHeroClient.instances.append(self)
+
+            def get_status(self, activation_id):
+                return "STATUS_WAIT_CODE"
+
+            def poll_code(self, activation_id, *, timeout):
+                self.polled = (activation_id, timeout)
+                raise RuntimeError("sms_code_timeout")
+
+            def cancel(self, activation_id):
+                self.cancelled.append(activation_id)
+                return "ACCESS_CANCEL"
+
+            def close(self):
+                pass
+
+        registrar = openai_register.PlatformRegistrar.__new__(openai_register.PlatformRegistrar)
+        registrar.session = SendOkSession()
+        registrar.device_id = "device-1"
+        hero_config = {
+            "enabled": True,
+            "api_key": "hero-key",
+            "wait_timeout": 120,
+            "poll_interval": 5,
+            "auto_buy": True,
+            "cancel_on_send_fail": True,
+        }
+        activation = mock.Mock(activation_id="387677529", phone="84901234889", raw="ACCESS_NUMBER:387677529:84901234889")
+
+        with (
+            mock.patch.dict(openai_register.config, {"hero_sms": hero_config}),
+            mock.patch.object(openai_register, "resolve_activation", return_value=activation),
+            mock.patch.object(openai_register, "HeroSmsClient", SlowHeroClient),
+            mock.patch.object(openai_register, "step"),
+        ):
+            with self.assertRaisesRegex(Exception, "sms_code_timeout"):
+                registrar._handle_codex_add_phone("https://auth.openai.com/add-phone", 1)
+
+        self.assertEqual(SlowHeroClient.instances[0].polled, ("387677529", 30.0))
+        self.assertEqual(SlowHeroClient.instances[0].cancelled, ["387677529"])
+
+    def test_codex_add_phone_schedules_retry_when_provider_denies_early_cancel(self):
+        class SendOkSession:
+            def request(self, method, url, **kwargs):
+                if "/api/accounts/add-phone/send" in url:
+                    return FakeResponse(
+                        status_code=200,
+                        json_data={"continue_url": "https://auth.openai.com/phone-verification"},
+                        url=url,
+                    )
+                if url == "https://auth.openai.com/phone-verification":
+                    return FakeResponse(status_code=200, url=url)
+                raise AssertionError(f"unexpected request {method} {url}")
+
+        class EarlyCancelDeniedHeroClient:
+            instances = []
+
+            def __init__(self, *args, **kwargs):
+                EarlyCancelDeniedHeroClient.instances.append(self)
+
+            def get_status(self, activation_id):
+                return "STATUS_WAIT_CODE"
+
+            def poll_code(self, activation_id, *, timeout):
+                raise RuntimeError("sms_code_timeout")
+
+            def cancel(self, activation_id):
+                raise RuntimeError("EARLY_CANCEL_DENIED: Activation cannot be cancelled at this time")
+
+            def close(self):
+                pass
+
+        registrar = openai_register.PlatformRegistrar.__new__(openai_register.PlatformRegistrar)
+        registrar.session = SendOkSession()
+        registrar.device_id = "device-1"
+        hero_config = {
+            "enabled": True,
+            "api_key": "hero-key",
+            "wait_timeout": 120,
+            "poll_interval": 5,
+        }
+        activation = mock.Mock(activation_id="389071018", phone="447700901668", raw="ACCESS_NUMBER:389071018:447700901668")
+
+        with (
+            mock.patch.dict(openai_register.config, {"hero_sms": hero_config}),
+            mock.patch.object(openai_register, "resolve_activation", return_value=activation),
+            mock.patch.object(openai_register, "HeroSmsClient", EarlyCancelDeniedHeroClient),
+            mock.patch.object(openai_register, "_schedule_hero_sms_cancel_retry") as schedule_retry,
+            mock.patch.object(openai_register, "step"),
+        ):
+            with self.assertRaisesRegex(Exception, "sms_code_timeout"):
+                registrar._handle_codex_add_phone("https://auth.openai.com/add-phone", 1)
+
+        schedule_retry.assert_called_once()
+        args = schedule_retry.call_args.args
+        self.assertEqual(args[:4], ("hero-key", "389071018", "等待 HeroSMS 验证码失败", 1))
 
     def test_register_can_use_codex_oauth_profile_without_changing_default(self):
         registrar = openai_register.PlatformRegistrar.__new__(openai_register.PlatformRegistrar)

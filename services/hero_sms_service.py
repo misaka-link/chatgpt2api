@@ -20,6 +20,9 @@ class HeroSmsActivation:
     activation_id: str
     phone: str
     raw: str
+    country: int | str | None = None
+    service: str = OPENAI_SERVICE_CODE
+    operator: str = "any"
 
 
 class HeroSmsClient:
@@ -100,7 +103,14 @@ class HeroSmsClient:
         parts = raw.split(":", 2)
         if len(parts) != 3 or not parts[1] or not parts[2]:
             raise HeroSmsError(f"invalid ACCESS_NUMBER response: {raw}")
-        return HeroSmsActivation(activation_id=parts[1], phone=parts[2], raw=raw)
+        return HeroSmsActivation(
+            activation_id=parts[1],
+            phone=parts[2],
+            raw=raw,
+            country=country,
+            service=service,
+            operator=operator or "any",
+        )
 
     def get_status(self, activation_id: str) -> str:
         return self._request("getStatus", id=str(activation_id or "").strip())

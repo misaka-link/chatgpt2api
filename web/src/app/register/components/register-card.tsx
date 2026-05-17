@@ -121,26 +121,12 @@ export function RegisterCard() {
             <div className="flex items-start justify-between gap-3">
               <div>
                 <h3 className="text-sm font-semibold text-stone-800">HeroSMS 接码配置</h3>
-                <p className="mt-1 text-xs text-stone-500">用于 Codex OAuth 遇到手机号验证时自动买号、轮询验证码。OpenAI 服务码默认 dr。</p>
+                <p className="mt-1 text-xs text-stone-500">用于 Codex OAuth 遇到手机号验证时自动买号、轮询验证码。系统自动轮询国家，用户只需要控制预算。</p>
               </div>
               <label className="flex items-center gap-2 rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm text-stone-700">
                 <Checkbox checked={Boolean(config.hero_sms.enabled)} onCheckedChange={(checked) => setHeroSmsField("enabled", Boolean(checked))} disabled={config.enabled} />
                 启用
               </label>
-            </div>
-            <div className="grid gap-3 md:grid-cols-3">
-              <label className="flex items-center gap-2 rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm text-stone-700">
-                <Checkbox checked={Boolean(config.hero_sms.auto_buy)} onCheckedChange={(checked) => setHeroSmsField("auto_buy", Boolean(checked))} disabled={config.enabled} />
-                自动买号
-              </label>
-              <label className="flex items-center gap-2 rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm text-stone-700">
-                <Checkbox checked={Boolean(config.hero_sms.cancel_on_send_fail)} onCheckedChange={(checked) => setHeroSmsField("cancel_on_send_fail", Boolean(checked))} disabled={config.enabled} />
-                send 失败自动 cancel
-              </label>
-              <div className="space-y-1">
-                <label className="text-sm text-stone-700">单号最高价 USD</label>
-                <Input value={String(config.hero_sms.max_price_usd || "")} onChange={(event) => setHeroSmsField("max_price_usd", event.target.value)} placeholder="0.03" className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled || !config.hero_sms.auto_buy} />
-              </div>
             </div>
             <div className="grid gap-4 md:grid-cols-3">
               <div className="space-y-2 md:col-span-2">
@@ -148,33 +134,11 @@ export function RegisterCard() {
                 <Input value={config.hero_sms.api_key} onChange={(event) => setHeroSmsField("api_key", event.target.value)} placeholder="HeroSMS API key" className="h-10 rounded-xl border-stone-200 bg-white font-mono text-xs" disabled={config.enabled} />
               </div>
               <div className="space-y-2">
-                <label className="text-sm text-stone-700">服务码</label>
-                <Input value={config.hero_sms.service} onChange={(event) => setHeroSmsField("service", event.target.value)} placeholder="dr" className="h-10 rounded-xl border-stone-200 bg-white font-mono text-xs" disabled={config.enabled} />
+                <label className="text-sm text-stone-700">单号最高价 USD</label>
+                <Input value={String(config.hero_sms.max_price_usd || "")} onChange={(event) => setHeroSmsField("max_price_usd", event.target.value)} placeholder="0.03" className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
               </div>
-              <div className="space-y-2">
-                <label className="text-sm text-stone-700">国家 ID</label>
-                <Input value={String(config.hero_sms.country || "")} onChange={(event) => setHeroSmsField("country", event.target.value)} placeholder="16" className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
-                <p className="text-[11px] text-stone-400">常用：10 越南，16 英国，187 美国，36 加拿大。</p>
-              </div>
-              <div className="space-y-2">
-                <label className="text-sm text-stone-700">运营商</label>
-                <Input value={config.hero_sms.operator} onChange={(event) => setHeroSmsField("operator", event.target.value)} placeholder="any" className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
-              </div>
-              <div className="space-y-2">
-                <label className="text-sm text-stone-700">短信等待超时（秒）</label>
-                <Input value={String(config.hero_sms.wait_timeout || "")} onChange={(event) => setHeroSmsField("wait_timeout", event.target.value)} placeholder="1200" className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
-              </div>
-              <div className="space-y-2">
-                <label className="text-sm text-stone-700">短信轮询间隔（秒）</label>
-                <Input value={String(config.hero_sms.poll_interval || "")} onChange={(event) => setHeroSmsField("poll_interval", event.target.value)} placeholder="5" className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
-              </div>
-              <div className="space-y-2">
-                <label className="text-sm text-stone-700">复用 Activation ID</label>
-                <Input value={config.hero_sms.reuse_activation_id} onChange={(event) => setHeroSmsField("reuse_activation_id", event.target.value)} placeholder="已购买号码的 id，可留空" className="h-10 rounded-xl border-stone-200 bg-white font-mono text-xs" disabled={config.enabled} />
-              </div>
-              <div className="space-y-2 md:col-span-2">
-                <label className="text-sm text-stone-700">复用手机号</label>
-                <Input value={config.hero_sms.reuse_phone} onChange={(event) => setHeroSmsField("reuse_phone", event.target.value)} placeholder="已购买号码；Activation ID 和手机号都填时不会再买新号" className="h-10 rounded-xl border-stone-200 bg-white font-mono text-xs" disabled={config.enabled} />
+              <div className="rounded-xl border border-stone-200 bg-stone-50 px-3 py-2 text-xs leading-5 text-stone-500 md:col-span-3">
+                内置策略：service=<code>dr</code>、operator=<code>any</code>、国家池自动轮询 <code>16 → 187 → 10 → 36</code>，短信最多等待 30 秒，收不到码立即 cancel 当前 activation，不堵后续线程。
               </div>
             </div>
           </div>

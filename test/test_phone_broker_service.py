@@ -5,10 +5,14 @@ from unittest import mock
 
 
 class PhoneBrokerServiceTests(unittest.TestCase):
-    def test_reserve_reuses_existing_activation_without_buying(self) -> None:
+    def test_reserve_ignores_stale_reuse_fields_and_buys_fresh_number(self) -> None:
+        from services.hero_sms_service import HeroSmsActivation
         from services.phone_broker_service import reserve_phone
 
-        with mock.patch("services.phone_broker_service.HeroSmsClient") as client_cls:
+        fake_client = mock.Mock()
+        fake_client.get_number.return_value = HeroSmsActivation("387677530", "84901234000", "ACCESS_NUMBER:387677530:84901234000", country=10)
+
+        with mock.patch("services.phone_broker_service.HeroSmsClient", return_value=fake_client):
             activation = reserve_phone(
                 {
                     "api_key": "hero-key",
@@ -22,18 +26,16 @@ class PhoneBrokerServiceTests(unittest.TestCase):
                 }
             )
 
-        self.assertEqual(activation.activation_id, "387677529")
-        self.assertEqual(activation.phone, "84901234889")
-        self.assertEqual(activation.raw, "REUSE_ACTIVATION")
-        client_cls.assert_not_called()
+        self.assertEqual(activation.activation_id, "387677530")
+        fake_client.get_number.assert_called_once_with(service="dr", country=10, operator="any", max_price=0.03)
 
-    def test_reserve_refuses_to_buy_when_auto_buy_is_disabled(self) -> None:
+    def test_reserve_requires_api_key(self) -> None:
         from services.phone_broker_service import reserve_phone
 
-        with self.assertRaisesRegex(RuntimeError, "auto_buy 未启用"):
+        with self.assertRaisesRegex(RuntimeError, "api_key 为空"):
             reserve_phone(
                 {
-                    "api_key": "hero-key",
+                    "api_key": "",
                     "service": "dr",
                     "country": 10,
                     "operator": "any",

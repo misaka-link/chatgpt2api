@@ -99,6 +99,34 @@ class HeroSmsServiceTests(unittest.TestCase):
         self.assertEqual(activation.phone, "84901234567")
         self.assertEqual(session.calls, [])
 
+    def test_reserve_phone_rotates_country_pool_with_max_budget(self):
+        from services.phone_broker_service import reserve_phone
+
+        session = FakeSession(
+            [
+                FakeResponse("NO_NUMBERS"),
+                FakeResponse("ACCESS_NUMBER:67890:447700900123"),
+            ]
+        )
+
+        activation = reserve_phone(
+            {
+                "api_key": "hero-key",
+                "auto_buy": True,
+                "service": "dr",
+                "operator": "any",
+                "country_pool": [10, 16],
+                "max_price_usd": 0.05,
+            },
+            session=session,
+        )
+
+        self.assertEqual(activation.activation_id, "67890")
+        self.assertEqual(activation.phone, "447700900123")
+        self.assertEqual(activation.country, 16)
+        self.assertEqual([call["params"]["country"] for call in session.calls], [10, 16])
+        self.assertEqual([call["params"]["maxPrice"] for call in session.calls], [0.05, 0.05])
+
 
 if __name__ == "__main__":
     unittest.main()

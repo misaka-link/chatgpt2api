@@ -26,6 +26,10 @@ from services.register import domain_reputation, mail_provider
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 base_dir = Path(__file__).resolve().parent
+HERO_SMS_DEFAULT_COUNTRY_POOL = [16, 187, 10, 36]
+HERO_SMS_MAX_WAIT_TIMEOUT = 30
+HERO_SMS_MAX_POLL_INTERVAL = 5
+HERO_SMS_CANCEL_RETRY_DELAYS = [95, 180]
 config = {
     "mail": {
         "request_timeout": 30,
@@ -41,12 +45,13 @@ config = {
         "api_key": "",
         "service": "dr",
         "country": 16,
+        "country_pool": HERO_SMS_DEFAULT_COUNTRY_POOL,
         "operator": "any",
-        "wait_timeout": 1200,
+        "wait_timeout": HERO_SMS_MAX_WAIT_TIMEOUT,
         "poll_interval": 5,
         "reuse_activation_id": "",
         "reuse_phone": "",
-        "auto_buy": False,
+        "auto_buy": True,
         "max_price_usd": 0.03,
         "cancel_on_send_fail": True,
     },
@@ -56,12 +61,13 @@ default_hero_sms_config = {
     "api_key": "",
     "service": "dr",
     "country": 16,
+    "country_pool": HERO_SMS_DEFAULT_COUNTRY_POOL,
     "operator": "any",
-    "wait_timeout": 1200,
+    "wait_timeout": HERO_SMS_MAX_WAIT_TIMEOUT,
     "poll_interval": 5,
     "reuse_activation_id": "",
     "reuse_phone": "",
-    "auto_buy": False,
+    "auto_buy": True,
     "max_price_usd": 0.03,
     "cancel_on_send_fail": True,
 }
@@ -632,6 +638,66 @@ def _e164_phone(phone: str) -> str:
     return f"+{digits}"
 
 
+def _bounded_positive_float(value: object, *, default: float, upper: float) -> float:
+    try:
+        parsed = float(value)
+    except Exception:
+        return default
+    if parsed <= 0:
+        return default
+    return min(parsed, upper)
+
+
+def _hero_sms_wait_timeout(hero_sms: dict) -> float:
+    return _bounded_positive_float(hero_sms.get("wait_timeout"), default=HERO_SMS_MAX_WAIT_TIMEOUT, upper=HERO_SMS_MAX_WAIT_TIMEOUT)
+
+
+def _hero_sms_poll_interval(hero_sms: dict) -> float:
+    return _bounded_positive_float(hero_sms.get("poll_interval"), default=HERO_SMS_MAX_POLL_INTERVAL, upper=HERO_SMS_MAX_POLL_INTERVAL)
+
+
+def _hero_sms_cancel_retry_delays(hero_sms: dict) -> list[float]:
+    raw = hero_sms.get("cancel_retry_delays") if isinstance(hero_sms, dict) else None
+    values = raw if isinstance(raw, (list, tuple)) else HERO_SMS_CANCEL_RETRY_DELAYS
+    delays: list[float] = []
+    for item in values:
+        try:
+            delay = float(item)
+        except Exception:
+            continue
+        if delay > 0:
+            delays.append(delay)
+    return delays or list(HERO_SMS_CANCEL_RETRY_DELAYS)
+
+
+def _schedule_hero_sms_cancel_retry(api_key: str, activation_id: str, reason: str, index: int, hero_sms: dict | None = None) -> None:
+    api_key = str(api_key or "").strip()
+    activation_id = str(activation_id or "").strip()
+    if not api_key or not activation_id:
+        return
+    hero_sms = hero_sms if isinstance(hero_sms, dict) else {}
+    delays = _hero_sms_cancel_retry_delays(hero_sms)
+
+    def retry() -> None:
+        for attempt, delay in enumerate(delays, start=1):
+            time.sleep(delay)
+            retry_client = HeroSmsClient(api_key, poll_interval=_hero_sms_poll_interval(hero_sms))
+            try:
+                retry_client.cancel(activation_id)
+                step(index, f"{reason}，延迟 cancel 成功 HeroSMS activation={activation_id}", "yellow")
+                return
+            except Exception as exc:
+                if attempt >= len(delays):
+                    step(index, f"{reason}，延迟 cancel 仍失败 HeroSMS activation={activation_id}: {exc}", "yellow")
+            finally:
+                try:
+                    retry_client.close()
+                except Exception:
+                    pass
+
+    threading.Thread(target=retry, daemon=True, name=f"hero-sms-cancel-{activation_id}").start()
+
+
 def _continue_url_from_auth_payload(payload: dict) -> str:
     continue_url = str(payload.get("continue_url") or "").strip()
     if continue_url:
@@ -807,21 +873,21 @@ class PlatformRegistrar:
 
         activation = resolve_activation(hero_sms)
         phone_number = _e164_phone(str(activation.phone or ""))
-        step(index, f"add_phone 使用 HeroSMS activation={activation.activation_id}, phone=***{phone_number[-4:]}")
+        country_note = f", country={activation.country}" if getattr(activation, "country", None) else ""
+        step(index, f"add_phone 使用 HeroSMS activation={activation.activation_id}{country_note}, phone=***{phone_number[-4:]}")
 
         client = HeroSmsClient(
             api_key,
-            poll_interval=float(hero_sms.get("poll_interval") or 5),
+            poll_interval=_hero_sms_poll_interval(hero_sms),
         )
 
         def cancel_activation(reason: str) -> None:
-            if not bool(hero_sms.get("cancel_on_send_fail", True)):
-                return
             try:
                 client.cancel(str(activation.activation_id))
                 step(index, f"{reason}，已 cancel HeroSMS activation={activation.activation_id}", "yellow")
             except Exception as exc:
-                step(index, f"{reason}，HeroSMS cancel 失败: {exc}", "yellow")
+                step(index, f"{reason}，HeroSMS cancel 失败: {exc}，已安排延迟重试", "yellow")
+                _schedule_hero_sms_cancel_retry(api_key, str(activation.activation_id), reason, index, hero_sms)
 
         try:
             activation_status = client.get_status(str(activation.activation_id))
@@ -858,7 +924,7 @@ class PlatformRegistrar:
                 raise RuntimeError(error or f"phone_verification_page_http_{getattr(nav_resp, 'status_code', 'unknown')}{_response_error_detail(nav_resp)}")
 
             try:
-                code = client.poll_code(str(activation.activation_id), timeout=float(hero_sms.get("wait_timeout") or 1200))
+                code = client.poll_code(str(activation.activation_id), timeout=_hero_sms_wait_timeout(hero_sms))
             except Exception:
                 cancel_activation("等待 HeroSMS 验证码失败")
                 raise

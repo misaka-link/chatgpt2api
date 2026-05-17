@@ -15,6 +15,7 @@ from services.register import openai_register
 
 
 REGISTER_FILE = DATA_DIR / "register.json"
+HERO_SMS_MAX_WAIT_TIMEOUT = 30
 
 
 def _now() -> str:
@@ -60,24 +61,53 @@ def _positive_float(value, default: float) -> float:
     return parsed if parsed > 0 else default
 
 
+def _positive_int_list(value, default: list[int]) -> list[int]:
+    items = []
+
+    def add(raw) -> None:
+        try:
+            parsed = int(raw)
+        except Exception:
+            return
+        if parsed > 0 and parsed not in items:
+            items.append(parsed)
+
+    if isinstance(value, str):
+        for item in value.replace(";", ",").replace("\n", ",").split(","):
+            add(item.strip())
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            add(item)
+    return items or list(default)
+
+
 def _normalize_hero_sms(raw: object) -> dict:
     defaults = dict(getattr(openai_register, "default_hero_sms_config", {}) or {})
     source = raw if isinstance(raw, dict) else {}
     service = str(source.get("service") or defaults.get("service") or "dr").strip().lower() or "dr"
     operator = str(source.get("operator") or defaults.get("operator") or "any").strip().lower() or "any"
+    default_country_pool = _positive_int_list(defaults.get("country_pool"), [16, 187, 10, 36])
+    country = _positive_int(source.get("country"), int(defaults.get("country") or default_country_pool[0]))
+    country_pool = _positive_int_list(source.get("country_pool"), default_country_pool)
+    if "country_pool" not in source and "country" in source:
+        country_pool = [country, *[item for item in country_pool if item != country]]
     return {
         "enabled": bool(source.get("enabled") if "enabled" in source else defaults.get("enabled", False)),
         "api_key": str(source.get("api_key") or defaults.get("api_key") or "").strip(),
         "service": service,
-        "country": _positive_int(source.get("country"), int(defaults.get("country") or 16)),
+        "country": country,
+        "country_pool": country_pool,
         "operator": operator,
-        "wait_timeout": _positive_int(source.get("wait_timeout"), int(defaults.get("wait_timeout") or 1200)),
-        "poll_interval": _positive_int(source.get("poll_interval"), int(defaults.get("poll_interval") or 5)),
-        "reuse_activation_id": str(source.get("reuse_activation_id") or defaults.get("reuse_activation_id") or "").strip(),
-        "reuse_phone": str(source.get("reuse_phone") or defaults.get("reuse_phone") or "").strip(),
-        "auto_buy": bool(source.get("auto_buy") if "auto_buy" in source else defaults.get("auto_buy", False)),
+        "wait_timeout": min(
+            HERO_SMS_MAX_WAIT_TIMEOUT,
+            _positive_int(source.get("wait_timeout"), int(defaults.get("wait_timeout") or HERO_SMS_MAX_WAIT_TIMEOUT)),
+        ),
+        "poll_interval": min(5, _positive_int(source.get("poll_interval"), int(defaults.get("poll_interval") or 5))),
+        "reuse_activation_id": "",
+        "reuse_phone": "",
+        "auto_buy": True,
         "max_price_usd": _positive_float(source.get("max_price_usd"), float(defaults.get("max_price_usd") or 0.03)),
-        "cancel_on_send_fail": bool(source.get("cancel_on_send_fail") if "cancel_on_send_fail" in source else defaults.get("cancel_on_send_fail", True)),
+        "cancel_on_send_fail": True,
     }
 
 

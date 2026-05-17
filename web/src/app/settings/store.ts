@@ -126,6 +126,27 @@ function normalizeFiles(items: CPARemoteFile[]) {
   return files;
 }
 
+function normalizeRegisterHeroSmsForSave(heroSms: RegisterConfig["hero_sms"]): RegisterConfig["hero_sms"] {
+  const countryPool = Array.isArray(heroSms.country_pool) && heroSms.country_pool.length > 0
+    ? heroSms.country_pool.map((item) => Number(item)).filter((item) => item > 0)
+    : [16, 187, 10, 36];
+
+  return {
+    ...heroSms,
+    service: "dr",
+    country: Number(heroSms.country) || countryPool[0] || 16,
+    country_pool: Array.from(new Set(countryPool)),
+    operator: "any",
+    wait_timeout: Math.min(30, Math.max(1, Number(heroSms.wait_timeout) || 30)),
+    poll_interval: Math.min(5, Math.max(1, Number(heroSms.poll_interval) || 5)),
+    reuse_activation_id: "",
+    reuse_phone: "",
+    auto_buy: true,
+    max_price_usd: Math.max(0.001, Number(heroSms.max_price_usd) || 0.03),
+    cancel_on_send_fail: true,
+  };
+}
+
 type SettingsStore = {
   config: SettingsConfig | null;
   isLoadingConfig: boolean;
@@ -645,7 +666,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       set({ isSavingRegister: true });
       const data = await updateRegisterConfig({
         mail: registerConfig.mail,
-        hero_sms: registerConfig.hero_sms,
+        hero_sms: normalizeRegisterHeroSmsForSave(registerConfig.hero_sms),
         proxy: registerConfig.proxy.trim(),
         total: Math.max(1, Number(registerConfig.total) || 1),
         threads: Math.max(1, Number(registerConfig.threads) || 1),
@@ -671,7 +692,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       if (!registerConfig.enabled) {
         await updateRegisterConfig({
           mail: registerConfig.mail,
-          hero_sms: registerConfig.hero_sms,
+          hero_sms: normalizeRegisterHeroSmsForSave(registerConfig.hero_sms),
           proxy: registerConfig.proxy.trim(),
           total: Math.max(1, Number(registerConfig.total) || 1),
           threads: Math.max(1, Number(registerConfig.threads) || 1),
@@ -698,7 +719,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     try {
       await updateRegisterConfig({
         mail: registerConfig.mail,
-        hero_sms: registerConfig.hero_sms,
+        hero_sms: normalizeRegisterHeroSmsForSave(registerConfig.hero_sms),
         proxy: registerConfig.proxy.trim(),
         total: Math.max(1, Number(registerConfig.total) || 1),
         threads: Math.max(1, Number(registerConfig.threads) || 1),

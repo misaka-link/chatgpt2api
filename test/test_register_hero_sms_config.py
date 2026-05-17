@@ -23,12 +23,13 @@ class RegisterHeroSmsConfigTests(unittest.TestCase):
                 "api_key": "",
                 "service": "dr",
                 "country": 16,
+                "country_pool": [16, 187, 10, 36],
                 "operator": "any",
-                "wait_timeout": 1200,
+                "wait_timeout": 30,
                 "poll_interval": 5,
                 "reuse_activation_id": "",
                 "reuse_phone": "",
-                "auto_buy": False,
+                "auto_buy": True,
                 "max_price_usd": 0.03,
                 "cancel_on_send_fail": True,
             },
@@ -44,12 +45,13 @@ class RegisterHeroSmsConfigTests(unittest.TestCase):
                     "api_key": "  hero-key  ",
                     "service": "",
                     "country": "187",
+                    "country_pool": ["", "36", "187", "bad", 36],
                     "operator": "",
-                    "wait_timeout": "0",
+                    "wait_timeout": "120",
                     "poll_interval": "2",
                     "reuse_activation_id": "  12345 ",
                     "reuse_phone": " +84901234567 ",
-                    "auto_buy": True,
+                    "auto_buy": False,
                     "max_price_usd": "0.025",
                     "cancel_on_send_fail": False,
                 }
@@ -60,35 +62,41 @@ class RegisterHeroSmsConfigTests(unittest.TestCase):
         self.assertEqual(cfg["hero_sms"]["api_key"], "hero-key")
         self.assertEqual(cfg["hero_sms"]["service"], "dr")
         self.assertEqual(cfg["hero_sms"]["country"], 187)
+        self.assertEqual(cfg["hero_sms"]["country_pool"], [36, 187])
         self.assertEqual(cfg["hero_sms"]["operator"], "any")
-        self.assertEqual(cfg["hero_sms"]["wait_timeout"], 1200)
+        self.assertEqual(cfg["hero_sms"]["wait_timeout"], 30)
         self.assertEqual(cfg["hero_sms"]["poll_interval"], 2)
-        self.assertEqual(cfg["hero_sms"]["reuse_activation_id"], "12345")
-        self.assertEqual(cfg["hero_sms"]["reuse_phone"], "+84901234567")
+        self.assertEqual(cfg["hero_sms"]["reuse_activation_id"], "")
+        self.assertEqual(cfg["hero_sms"]["reuse_phone"], "")
         self.assertEqual(cfg["hero_sms"]["auto_buy"], True)
         self.assertEqual(cfg["hero_sms"]["max_price_usd"], 0.025)
-        self.assertEqual(cfg["hero_sms"]["cancel_on_send_fail"], False)
+        self.assertEqual(cfg["hero_sms"]["cancel_on_send_fail"], True)
 
-    def test_register_ui_exposes_hero_sms_fields(self) -> None:
+    def test_register_ui_only_exposes_hero_sms_budget_and_secret(self) -> None:
         source = REGISTER_CARD.read_text(encoding="utf-8")
 
         self.assertIn("HeroSMS 接码配置", source)
         self.assertIn("setHeroSmsField", source)
         self.assertIn("config.hero_sms.api_key", source)
-        self.assertIn("config.hero_sms.country", source)
-        self.assertIn("config.hero_sms.operator", source)
-        self.assertIn("config.hero_sms.reuse_activation_id", source)
-        self.assertIn("config.hero_sms.reuse_phone", source)
-        self.assertIn("config.hero_sms.auto_buy", source)
         self.assertIn("config.hero_sms.max_price_usd", source)
-        self.assertIn("config.hero_sms.cancel_on_send_fail", source)
+        self.assertIn("自动轮询国家", source)
+        self.assertNotIn('setHeroSmsField("country"', source)
+        self.assertNotIn('setHeroSmsField("operator"', source)
+        self.assertNotIn('setHeroSmsField("service"', source)
+        self.assertNotIn('setHeroSmsField("wait_timeout"', source)
+        self.assertNotIn('setHeroSmsField("poll_interval"', source)
+        self.assertNotIn('setHeroSmsField("reuse_activation_id"', source)
+        self.assertNotIn('setHeroSmsField("reuse_phone"', source)
+        self.assertNotIn('setHeroSmsField("auto_buy"', source)
+        self.assertNotIn('setHeroSmsField("cancel_on_send_fail"', source)
         self.assertIn("启动 Codex CPA 注册", source)
 
     def test_register_store_saves_hero_sms_config(self) -> None:
         source = SETTINGS_STORE.read_text(encoding="utf-8")
 
         self.assertIn("setRegisterHeroSmsField", source)
-        self.assertIn("hero_sms: registerConfig.hero_sms", source)
+        self.assertIn("normalizeRegisterHeroSmsForSave", source)
+        self.assertIn("hero_sms: normalizeRegisterHeroSmsForSave(registerConfig.hero_sms)", source)
         self.assertIn("max_price_usd", source)
         self.assertIn("startCodexRegister", source)
 

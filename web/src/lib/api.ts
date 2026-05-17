@@ -214,6 +214,7 @@ export type RegisterConfig = {
     api_key: string;
     service: string;
     country: number;
+    country_pool: number[];
     operator: string;
     wait_timeout: number;
     poll_interval: number;
