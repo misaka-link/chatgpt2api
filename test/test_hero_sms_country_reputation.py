@@ -95,6 +95,91 @@ class HeroSmsCountryReputationTests(unittest.TestCase):
 
         self.assertEqual(store.rank_candidates(candidates)[0].country, 31)
 
+    def test_active_cooldown_overrides_stale_cpa_success(self):
+        from services import hero_sms_country_reputation
+
+        store = self.make_store()
+        for _ in range(12):
+            store.record_event(31, "cpa_success", price=0.05)
+        for _ in range(3):
+            store.record_event(31, "sms_code_timeout", price=0.05)
+        for _ in range(4):
+            store.record_event(117, "send_ok", price=0.05)
+            store.record_event(117, "sms_ok", price=0.05)
+            store.record_event(117, "add_phone_success", price=0.05)
+
+        candidates = [
+            hero_sms_country_reputation.CountryCandidate(country=31, price=0.05, count=3200, physical_count=3200, provider_rank=1),
+            hero_sms_country_reputation.CountryCandidate(country=117, price=0.05, count=900, physical_count=890, provider_rank=2),
+        ]
+
+        self.assertEqual(store.rank_candidates(candidates)[0].country, 117)
+
+    def test_bad_receive_rate_overrides_stale_cpa_success(self):
+        from services import hero_sms_country_reputation
+
+        store = self.make_store()
+        bad_record = {
+            "cpa_success": 18,
+            "add_phone_success": 8,
+            "send_ok": 65,
+            "sms_ok": 8,
+            "sms_code_timeout": 55,
+            "consecutive_fail": 0,
+            "cooldown_until": "",
+        }
+        healthy_record = {
+            "cpa_success": 0,
+            "add_phone_success": 6,
+            "send_ok": 8,
+            "sms_ok": 6,
+            "sms_code_timeout": 1,
+            "consecutive_fail": 0,
+            "cooldown_until": "",
+        }
+
+        bad = hero_sms_country_reputation.CountryCandidate(country=31, price=0.05, count=3200, physical_count=3000, provider_rank=1)
+        healthy = hero_sms_country_reputation.CountryCandidate(country=117, price=0.05, count=900, physical_count=890, provider_rank=2)
+
+        self.assertLess(store.score_candidate(bad, bad_record), store.score_candidate(healthy, healthy_record))
+
+    def test_long_failure_streak_overrides_old_add_phone_success(self):
+        from services import hero_sms_country_reputation
+
+        store = self.make_store()
+        stale_record = {
+            "cpa_success": 0,
+            "add_phone_success": 36,
+            "send_ok": 63,
+            "sms_ok": 36,
+            "sms_code_timeout": 27,
+            "consecutive_fail": 20,
+            "cooldown_until": "",
+        }
+        clean_record = {
+            "cpa_success": 0,
+            "add_phone_success": 0,
+            "send_ok": 0,
+            "sms_ok": 0,
+            "sms_code_timeout": 0,
+            "consecutive_fail": 0,
+            "cooldown_until": "",
+        }
+
+        stale = hero_sms_country_reputation.CountryCandidate(country=117, price=0.05, count=900, physical_count=890, provider_rank=1)
+        clean = hero_sms_country_reputation.CountryCandidate(country=33, price=0.05, count=4000, physical_count=3500, provider_rank=2)
+
+        self.assertLess(store.score_candidate(stale, stale_record), store.score_candidate(clean, clean_record))
+
+    def test_provider_rank_zero_is_not_treated_as_missing_rank(self):
+        from services import hero_sms_country_reputation
+
+        store = self.make_store()
+        first = hero_sms_country_reputation.CountryCandidate(country=33, price=0.05, count=3000, physical_count=2800, provider_rank=0)
+        later = hero_sms_country_reputation.CountryCandidate(country=49, price=0.05, count=3000, physical_count=2800, provider_rank=5)
+
+        self.assertGreater(store.score_candidate(first, {}), store.score_candidate(later, {}))
+
     def test_spend_is_counted_once_when_number_is_bought(self):
         store = self.make_store()
 

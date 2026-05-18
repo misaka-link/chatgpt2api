@@ -228,7 +228,7 @@ def _rank_priced_candidates(candidates: list[_PhoneCandidate]) -> list[_PhoneCan
             price=float(item.price or 0),
             count=int(item.count or 0),
             physical_count=int(item.physical_count or item.count or 0),
-            provider_rank=int(item.provider_rank or 999),
+            provider_rank=int(item.provider_rank if item.provider_rank is not None else 999),
         )
         for item in candidates
         if item.price is not None
@@ -282,7 +282,7 @@ def _candidate_pool(
         for item in candidates[:8]
         if item.price is not None
     )
-    emit(f"HeroSMS 价格过滤命中 {len(candidates)} 个候选，已按成本排序: {preview}")
+    emit(f"HeroSMS 价格过滤命中 {len(candidates)} 个候选，已按质量/历史/成本综合排序: {preview}")
     return candidates
 
 

@@ -23,6 +23,12 @@ SMS_TIMEOUT_COOLDOWN_AFTER = 3
 SMS_TIMEOUT_COOLDOWN = timedelta(minutes=15)
 PHONE_IN_USE_COOLDOWN_AFTER = 3
 PHONE_IN_USE_COOLDOWN = timedelta(hours=1)
+LOW_RECEIVE_RATE_MIN_SENDS = 10
+LOW_RECEIVE_RATE_THRESHOLD = 0.25
+LOW_RECEIVE_RATE_PENALTY = 100000
+ACTIVE_COOLDOWN_SCORE = -1_000_000_000.0
+LONG_FAILURE_STREAK_THRESHOLD = 5
+LONG_FAILURE_STREAK_PENALTY = 1000
 
 
 @dataclass(frozen=True)
@@ -158,28 +164,39 @@ class CountryReputationStore:
 
     def score_candidate(self, candidate: CountryCandidate, record: dict[str, Any] | None = None) -> float:
         record = record or {}
+        cooldown_until = _parse_time(record.get("cooldown_until"))
+        if cooldown_until and cooldown_until > _now():
+            return ACTIVE_COOLDOWN_SCORE
         count = max(0, int(candidate.count or 0))
         physical = max(0, int(candidate.physical_count or 0))
         physical_ratio = min(1.0, physical / max(1, count))
         price = max(0.0, float(candidate.price or 0.0))
+        send_ok = int(record.get("send_ok") or 0)
+        sms_ok = int(record.get("sms_ok") or 0)
         score = 0.0
         score += int(record.get("cpa_success") or 0) * 3000
         score += int(record.get("add_phone_success") or 0) * 110
-        score += int(record.get("sms_ok") or 0) * 35
-        score += int(record.get("send_ok") or 0) * 10
+        score += sms_ok * 35
+        score += send_ok * 10
         score -= int(record.get("fraud_guard") or 0) * 260
         score -= int(record.get("phone_number_in_use") or 0) * 45
         score -= int(record.get("sms_code_timeout") or 0) * 30
         score -= int(record.get("send_fail") or 0) * 60
         score -= int(record.get("phone_otp_validate_fail") or 0) * 70
-        score -= int(record.get("consecutive_fail") or 0) * 15
+        consecutive_fail = int(record.get("consecutive_fail") or 0)
+        score -= consecutive_fail * 15
+        if consecutive_fail >= LONG_FAILURE_STREAK_THRESHOLD:
+            score -= (consecutive_fail - LONG_FAILURE_STREAK_THRESHOLD + 1) * LONG_FAILURE_STREAK_PENALTY
+        if send_ok >= LOW_RECEIVE_RATE_MIN_SENDS:
+            receive_rate = sms_ok / max(1, send_ok)
+            if receive_rate < LOW_RECEIVE_RATE_THRESHOLD:
+                score -= LOW_RECEIVE_RATE_PENALTY
+                score -= (LOW_RECEIVE_RATE_THRESHOLD - receive_rate) * LOW_RECEIVE_RATE_PENALTY
         score += min(60.0, math.log10(count + 1) * 12)
         score += physical_ratio * 60
         score -= price * 260
-        score -= min(120, max(0, int(candidate.provider_rank or 999))) * 1.2
-        cooldown_until = _parse_time(record.get("cooldown_until"))
-        if cooldown_until and cooldown_until > _now():
-            score -= 10000
+        provider_rank = candidate.provider_rank if candidate.provider_rank is not None else 999
+        score -= min(120, max(0, int(provider_rank))) * 1.2
         return score
 
     def rank_candidates(self, candidates: list[CountryCandidate]) -> list[CountryCandidate]:
