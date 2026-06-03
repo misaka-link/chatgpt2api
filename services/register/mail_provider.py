@@ -135,6 +135,10 @@ YYDS_DEFAULT_DOMAINS = (
 )
 
 
+class LocalDomainFilteredError(RuntimeError):
+    """Raised when local domain reputation leaves no usable domain."""
+
+
 def _config(mail_config: dict) -> dict:
     return {
         "request_timeout": float(mail_config.get("request_timeout") or 30),
@@ -982,7 +986,7 @@ class YydsMailProvider(BaseMailProvider):
             usable = domain_reputation.store.usable_domains(self.name, seed_domains)
             if usable:
                 return _next_domain(usable)
-            raise RuntimeError("YYDSMail 可用域名为空：白名单域名已全部被拉黑，请补充 Domain 或开启学习模式")
+            raise LocalDomainFilteredError("YYDSMail 可用域名为空：白名单域名已全部被本地标记过滤，跳过本次注册")
 
         if random.random() < self.domain_explore_rate:
             return ""

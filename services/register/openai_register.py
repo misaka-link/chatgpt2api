@@ -238,6 +238,8 @@ def _record_mail_success(result: dict) -> None:
 
 
 def _record_mail_failure(error: Exception) -> dict:
+    if isinstance(error, mail_provider.LocalDomainFilteredError):
+        return {}
     if not isinstance(error, RegisterAttemptError):
         return {}
     provider = error.mail_provider
@@ -490,6 +492,8 @@ class PlatformRegistrar:
         except RegisterAttemptError:
             raise
         except Exception as exc:
+            if isinstance(exc, mail_provider.LocalDomainFilteredError):
+                raise
             if mailbox:
                 raise RegisterAttemptError(str(exc), mailbox) from exc
             raise
@@ -514,6 +518,9 @@ def worker(index: int) -> dict:
             avg = (time.time() - stats["start_time"]) / stats["success"]
         log(f'{result["email"]} 注册成功，本次耗时{cost:.1f}s，全局平均每个号注册耗时{avg:.1f}s', "green")
         return {"ok": True, "index": index, "result": result}
+    except mail_provider.LocalDomainFilteredError as e:
+        log(f"任务{index} 已跳过，本地邮箱域名信誉过滤: {e}", "yellow")
+        return {"ok": False, "skipped": True, "index": index, "reason": str(e)}
     except Exception as e:
         cost = time.time() - start
         reputation = _record_mail_failure(e)

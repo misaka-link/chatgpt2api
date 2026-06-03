@@ -180,12 +180,15 @@ class RegisterService:
                     continue
                 finished, futures = wait(futures, return_when=FIRST_COMPLETED)
                 for future in finished:
-                    done += 1
                     try:
                         result = future.result()
+                        if result.get("skipped"):
+                            continue
+                        done += 1
                         success += 1 if result.get("ok") else 0
                         fail += 0 if result.get("ok") else 1
                     except Exception:
+                        done += 1
                         fail += 1
         self._bump(running=0, done=done, success=success, fail=fail, finished_at=_now())
         with self._lock:
