@@ -54,7 +54,7 @@ export function RegisterCard() {
       ...(type === "inbucket" ? { api_base: "", domain: [], random_subdomain: true } : {}),
       ...(type === "duckmail" ? { api_key: "", default_domain: "duckmail.sbs" } : {}),
       ...(type === "gptmail" ? { api_key: "", default_domain: "" } : {}),
-      ...(type === "yyds_mail" ? { api_base: "https://maliapi.215.im/v1", api_key: "", domain: [], subdomain: "", wildcard: false } : {}),
+      ...(type === "yyds_mail" ? { api_base: "https://maliapi.215.im/v1", api_key: "", domain: [], subdomain: "", wildcard: false, learning_mode: false, domain_learning: false, domain_explore_rate: 0 } : {}),
       ...(type === "ddg_mail" ? { ddg_token: "", cf_inbox_jwt: "", cf_domain: [], admin_password: "" } : {}),
     });
   };
@@ -149,6 +149,7 @@ export function RegisterCard() {
                 const type = String(provider.type || "tempmail_lol");
                 const domains = Array.isArray(provider.domain) ? provider.domain.map(String).join("\n") : "";
                 const subdomains = Array.isArray(provider.subdomain) ? provider.subdomain.map(String).join("\n") : "";
+                const learningMode = Boolean(provider.learning_mode ?? provider.domain_learning);
                 return (
                   <div key={index} className="space-y-3 border-t border-stone-200 pt-3 first:border-t-0 first:pt-0">
                     <div className="flex items-center justify-between gap-3">
@@ -256,6 +257,26 @@ export function RegisterCard() {
                             <Checkbox checked={Boolean(provider.wildcard)} onCheckedChange={(checked) => updateProvider(index, { wildcard: Boolean(checked) })} disabled={config.enabled} />
                             Wildcard
                           </label>
+                          <label className="flex items-start gap-3 rounded-xl border border-stone-200 bg-stone-50 px-3 py-2 text-sm text-stone-700 md:col-span-2">
+                            <Checkbox
+                              checked={learningMode}
+                              onCheckedChange={(checked) => {
+                                const enabled = Boolean(checked);
+                                updateProvider(index, {
+                                  learning_mode: enabled,
+                                  domain_learning: enabled,
+                                  domain_explore_rate: enabled ? Number(provider.domain_explore_rate || 0.12) || 0.12 : 0,
+                                });
+                              }}
+                              disabled={config.enabled}
+                            />
+                            <span>
+                              <span className="block font-medium">学习模式</span>
+                              <span className="mt-1 block text-xs leading-5 text-stone-500">
+                                关闭时按 Domain 白名单注册，并跳过已自动拉黑域名；开启后才会使用历史成功域名和随机探索来专门学习域名质量。
+                              </span>
+                            </span>
+                          </label>
                         </>
                       ) : null}
                     </div>
@@ -263,7 +284,7 @@ export function RegisterCard() {
                     {type === "cloudmail_gen" || type === "tempmail_lol" || type === "cloudflare_temp_email" || type === "moemail" || type === "inbucket" || type === "yyds_mail" || type === "ddg_mail" ? (
                       <div className="space-y-2">
                         <label className="text-sm text-stone-700">{type === "cloudmail_gen" ? "邮箱域名" : type === "inbucket" ? "基础域名列表" : "Domain"}</label>
-                        <Textarea value={domains} onChange={(event) => updateProvider(index, { domain: event.target.value.split(/[\n,]/).map((item) => item.trim()) })} placeholder={type === "cloudmail_gen" ? "每行一个域名，留空则使用服务默认域名" : type === "inbucket" ? "每行一个基础域名，系统会自动生成随机子域名" : type === "moemail" ? "每行一个域名" : "每行一个域名，留空则使用服务默认域名"} className="min-h-20 rounded-xl border-stone-200 bg-white font-mono text-xs" disabled={config.enabled} />
+                        <Textarea value={domains} onChange={(event) => updateProvider(index, { domain: event.target.value.split(/[\n,]/).map((item) => item.trim()).filter(Boolean) })} placeholder={type === "cloudmail_gen" ? "每行一个域名，留空则使用服务默认域名" : type === "inbucket" ? "每行一个基础域名，系统会自动生成随机子域名" : type === "moemail" ? "每行一个域名" : type === "yyds_mail" ? "每行一个白名单域名；非学习模式只会从这里选择，硬失败会自动拉黑" : "每行一个域名，留空则使用服务默认域名"} className="min-h-20 rounded-xl border-stone-200 bg-white font-mono text-xs" disabled={config.enabled} />
                       </div>
                     ) : null}
                     {type === "cloudmail_gen" ? (
