@@ -14,11 +14,12 @@ import {
   resetRegister as resetRegisterApi,
   fetchSettingsConfig,
   runBackupNow,
-  startCodexRegister as startCodexRegisterApi,
+  syncImageStorage,
   startRegister,
   startCPAImport,
   stopRegister,
   testBackupConnection,
+  testImageStorageConnection,
   updateCPAPool,
   updateRegisterConfig,
   updateSettingsConfig,
@@ -27,6 +28,8 @@ import {
   type BackupState,
   type CPAPool,
   type CPARemoteFile,
+  type ImageStorageMode,
+  type ImageStorageSettings,
   type RegisterConfig,
   type SettingsConfig,
 } from "@/lib/api";
@@ -35,10 +38,23 @@ export const PAGE_SIZE_OPTIONS = ["50", "100", "200"] as const;
 
 export type PageSizeOption = (typeof PAGE_SIZE_OPTIONS)[number];
 
-const DEFAULT_HERO_SMS_COUNTRY_POOL = [6, 117, 31, 33, 2, 39, 48, 37, 13, 40, 15, 8, 129, 32, 86, 173, 43, 49, 34, 7, 85, 27, 172, 63, 56, 177, 54, 24, 1, 46, 175, 14, 67, 83, 59, 187, 36];
-const DEFAULT_HERO_SMS_COUNTRY_BLACKLIST = [16, 10, 4];
-
 function normalizeConfig(config: SettingsConfig): SettingsConfig {
+  const imageStorage = typeof config.image_storage === "object" && config.image_storage
+    ? config.image_storage as ImageStorageSettings
+    : {
+      enabled: false,
+      mode: "local",
+      webdav_url: "",
+      webdav_username: "",
+      webdav_password: "",
+      webdav_root_path: "chatgpt2api/images",
+      public_base_url: "",
+    };
+  const imageStorageMode: ImageStorageMode = imageStorage.enabled && imageStorage.mode === "both"
+    ? "both"
+    : imageStorage.enabled && imageStorage.mode === "webdav"
+      ? "webdav"
+      : "local";
   const backup = typeof config.backup === "object" && config.backup
     ? config.backup as BackupSettings
     : {
@@ -71,8 +87,13 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     image_retention_days: Number(config.image_retention_days || 30),
     image_poll_timeout_secs: Number(config.image_poll_timeout_secs || 120),
     image_account_concurrency: Number(config.image_account_concurrency || 3),
+    image_settle_enabled: Boolean(config.image_settle_enabled !== false),
+    image_check_before_hit_enabled: Boolean(config.image_check_before_hit_enabled !== false),
+    image_settle_secs: Number(config.image_settle_secs || 2.0),
+    image_timeout_retry_secs: Number(config.image_timeout_retry_secs || 30),
     auto_remove_invalid_accounts: Boolean(config.auto_remove_invalid_accounts),
     auto_remove_rate_limited_accounts: Boolean(config.auto_remove_rate_limited_accounts),
+    auto_relogin_after_refresh: Boolean(config.auto_relogin_after_refresh),
     log_levels: Array.isArray(config.log_levels) ? config.log_levels : [],
     proxy: typeof config.proxy === "string" ? config.proxy : "",
     base_url: typeof config.base_url === "string" ? config.base_url : "",
@@ -84,6 +105,15 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
       api_key: String(config.ai_review?.api_key || ""),
       model: String(config.ai_review?.model || ""),
       prompt: String(config.ai_review?.prompt || ""),
+    },
+    image_storage: {
+      enabled: Boolean(imageStorage.enabled),
+      mode: imageStorageMode,
+      webdav_url: String(imageStorage.webdav_url || ""),
+      webdav_username: String(imageStorage.webdav_username || ""),
+      webdav_password: String(imageStorage.webdav_password || ""),
+      webdav_root_path: String(imageStorage.webdav_root_path || "chatgpt2api/images"),
+      public_base_url: String(imageStorage.public_base_url || ""),
     },
     backup: {
       ...backup,
@@ -129,37 +159,6 @@ function normalizeFiles(items: CPARemoteFile[]) {
   return files;
 }
 
-function normalizeRegisterHeroSmsForSave(heroSms: RegisterConfig["hero_sms"]): RegisterConfig["hero_sms"] {
-  const countryBlacklist = Array.isArray(heroSms.country_blacklist) && heroSms.country_blacklist.length > 0
-    ? heroSms.country_blacklist.map((item) => Number(item)).filter((item) => item > 0)
-    : DEFAULT_HERO_SMS_COUNTRY_BLACKLIST;
-  const blacklist = Array.from(new Set([...DEFAULT_HERO_SMS_COUNTRY_BLACKLIST, ...countryBlacklist]));
-  const countryPool = Array.isArray(heroSms.country_pool) && heroSms.country_pool.length > 0
-    ? heroSms.country_pool.map((item) => Number(item)).filter((item) => item > 0)
-    : DEFAULT_HERO_SMS_COUNTRY_POOL;
-  const filteredCountryPool = Array.from(new Set(countryPool)).filter((item) => !blacklist.includes(item));
-  const finalCountryPool = filteredCountryPool.length > 0 ? filteredCountryPool : DEFAULT_HERO_SMS_COUNTRY_POOL.filter((item) => !blacklist.includes(item));
-  const maxPriceUsd = Math.max(0.001, Number(heroSms.max_price_usd) || 0.1);
-  const minPriceUsd = Math.min(maxPriceUsd, Math.max(0, Number(heroSms.min_price_usd) || 0.045));
-
-  return {
-    ...heroSms,
-    service: "dr",
-    country: finalCountryPool[0] || 6,
-    country_pool: finalCountryPool,
-    country_blacklist: blacklist,
-    operator: "any",
-    wait_timeout: Math.min(45, Math.max(1, Number(heroSms.wait_timeout) || 45)),
-    poll_interval: Math.min(5, Math.max(1, Number(heroSms.poll_interval) || 5)),
-    reuse_activation_id: "",
-    reuse_phone: "",
-    auto_buy: true,
-    min_price_usd: minPriceUsd,
-    max_price_usd: maxPriceUsd,
-    cancel_on_send_fail: true,
-  };
-}
-
 type SettingsStore = {
   config: SettingsConfig | null;
   isLoadingConfig: boolean;
@@ -170,6 +169,8 @@ type SettingsStore = {
   isRunningBackup: boolean;
   deletingBackupKey: string | null;
   isTestingBackup: boolean;
+  isTestingImageStorage: boolean;
+  isSyncingImageStorage: boolean;
 
   registerConfig: RegisterConfig | null;
   isLoadingRegister: boolean;
@@ -208,14 +209,22 @@ type SettingsStore = {
   setImageRetentionDays: (value: string) => void;
   setImagePollTimeoutSecs: (value: string) => void;
   setImageAccountConcurrency: (value: string) => void;
+  setImageSettleEnabled: (value: boolean) => void;
+  setImageCheckBeforeHitEnabled: (value: boolean) => void;
+  setImageSettleSecs: (value: string) => void;
+  setImageTimeoutRetrySecs: (value: string) => void;
   setAutoRemoveInvalidAccounts: (value: boolean) => void;
   setAutoRemoveRateLimitedAccounts: (value: boolean) => void;
+  setAutoReloginAfterRefresh: (value: boolean) => void;
   setLogLevel: (level: string, enabled: boolean) => void;
   setProxy: (value: string) => void;
   setBaseUrl: (value: string) => void;
   setGlobalSystemPrompt: (value: string) => void;
   setSensitiveWordsText: (value: string) => void;
   setAIReviewField: (key: "enabled" | "base_url" | "api_key" | "model" | "prompt", value: string | boolean) => void;
+  setImageStorageField: (key: keyof ImageStorageSettings, value: string | boolean) => void;
+  testImageStorage: () => Promise<void>;
+  syncImagesToWebDAV: () => Promise<void>;
   setBackupField: (key: keyof BackupSettings, value: string | boolean) => void;
   setBackupInclude: (key: keyof BackupSettings["include"], value: boolean) => void;
 
@@ -229,13 +238,11 @@ type SettingsStore = {
   setRegisterTargetAvailable: (value: string) => void;
   setRegisterCheckInterval: (value: string) => void;
   setRegisterMailField: (key: "request_timeout" | "wait_timeout" | "wait_interval", value: string) => void;
-  setRegisterHeroSmsField: (key: keyof RegisterConfig["hero_sms"], value: string | boolean) => void;
   addRegisterProvider: () => void;
   updateRegisterProvider: (index: number, updates: Record<string, unknown>) => void;
   deleteRegisterProvider: (index: number) => void;
   saveRegister: () => Promise<void>;
   toggleRegister: () => Promise<void>;
-  startCodexRegister: () => Promise<void>;
   resetRegister: () => Promise<void>;
 
   loadPools: (silent?: boolean) => Promise<void>;
@@ -269,6 +276,8 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   isRunningBackup: false,
   deletingBackupKey: null,
   isTestingBackup: false,
+  isTestingImageStorage: false,
+  isSyncingImageStorage: false,
 
   registerConfig: null,
   isLoadingRegister: true,
@@ -341,8 +350,13 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         image_retention_days: Math.max(1, Number(config.image_retention_days) || 30),
         image_poll_timeout_secs: Math.max(1, Number(config.image_poll_timeout_secs) || 120),
         image_account_concurrency: Math.max(1, Number(config.image_account_concurrency) || 3),
+        image_settle_enabled: Boolean(config.image_settle_enabled !== false),
+        image_check_before_hit_enabled: Boolean(config.image_check_before_hit_enabled !== false),
+        image_settle_secs: Math.max(0.5, Number(config.image_settle_secs) || 2.0),
+        image_timeout_retry_secs: Math.max(1, Number(config.image_timeout_retry_secs) || 30),
         auto_remove_invalid_accounts: Boolean(config.auto_remove_invalid_accounts),
         auto_remove_rate_limited_accounts: Boolean(config.auto_remove_rate_limited_accounts),
+        auto_relogin_after_refresh: Boolean(config.auto_relogin_after_refresh),
         proxy: config.proxy.trim(),
         base_url: String(config.base_url || "").trim(),
         global_system_prompt: String(config.global_system_prompt || "").trim(),
@@ -353,6 +367,15 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
           api_key: String(config.ai_review?.api_key || "").trim(),
           model: String(config.ai_review?.model || "").trim(),
           prompt: String(config.ai_review?.prompt || "").trim(),
+        },
+        image_storage: {
+          enabled: Boolean(config.image_storage?.enabled),
+          mode: config.image_storage?.enabled && ["webdav", "both"].includes(String(config.image_storage?.mode)) ? config.image_storage.mode : "local",
+          webdav_url: String(config.image_storage?.webdav_url || "").trim(),
+          webdav_username: String(config.image_storage?.webdav_username || "").trim(),
+          webdav_password: String(config.image_storage?.webdav_password || "").trim(),
+          webdav_root_path: String(config.image_storage?.webdav_root_path || "chatgpt2api/images").trim(),
+          public_base_url: String(config.image_storage?.public_base_url || "").trim(),
         },
         backup: {
           ...(config.backup as BackupSettings),
@@ -405,12 +428,32 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     set((state) => state.config ? { config: { ...state.config, image_account_concurrency: value } } : {});
   },
 
+  setImageSettleEnabled: (value) => {
+    set((state) => state.config ? { config: { ...state.config, image_settle_enabled: value, image_check_before_hit_enabled: value } } : {});
+  },
+
+  setImageCheckBeforeHitEnabled: (value) => {
+    set((state) => state.config ? { config: { ...state.config, image_check_before_hit_enabled: value } } : {});
+  },
+
+  setImageSettleSecs: (value) => {
+    set((state) => state.config ? { config: { ...state.config, image_settle_secs: value } } : {});
+  },
+
+  setImageTimeoutRetrySecs: (value) => {
+    set((state) => state.config ? { config: { ...state.config, image_timeout_retry_secs: value } } : {});
+  },
+
   setAutoRemoveInvalidAccounts: (value) => {
     set((state) => state.config ? { config: { ...state.config, auto_remove_invalid_accounts: value } } : {});
   },
 
   setAutoRemoveRateLimitedAccounts: (value) => {
     set((state) => state.config ? { config: { ...state.config, auto_remove_rate_limited_accounts: value } } : {});
+  },
+
+  setAutoReloginAfterRefresh: (value) => {
+    set((state) => state.config ? { config: { ...state.config, auto_relogin_after_refresh: value } } : {});
   },
 
   setLogLevel: (level, enabled) => {
@@ -461,6 +504,66 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   setAIReviewField: (key, value) => {
     set((state) => state.config ? { config: { ...state.config, ai_review: { ...(state.config.ai_review || {}), [key]: value } } } : {});
+  },
+
+  setImageStorageField: (key, value) => {
+    set((state) => {
+      if (!state.config?.image_storage) {
+        return {};
+      }
+      const next = {
+        ...state.config.image_storage,
+        [key]: value,
+      };
+      if (key === "enabled" && !value) {
+        next.mode = "local";
+      }
+      if (key === "enabled" && value && next.mode === "local") {
+        next.mode = "webdav";
+      }
+      return {
+        config: {
+          ...state.config,
+          image_storage: next,
+        },
+      };
+    });
+  },
+
+  testImageStorage: async () => {
+    set({ isTestingImageStorage: true });
+    try {
+      const saved = await get().saveConfig();
+      if (!saved) {
+        return;
+      }
+      const data = await testImageStorageConnection();
+      if (data.result.ok) {
+        toast.success(`WebDAV 连接可用：HTTP ${data.result.status}`);
+      } else {
+        toast.error(`WebDAV 连接失败：${data.result.error ?? `HTTP ${data.result.status}`}`);
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "测试 WebDAV 失败");
+    } finally {
+      set({ isTestingImageStorage: false });
+    }
+  },
+
+  syncImagesToWebDAV: async () => {
+    set({ isSyncingImageStorage: true });
+    try {
+      const saved = await get().saveConfig();
+      if (!saved) {
+        return;
+      }
+      const data = await syncImageStorage();
+      toast.success(`同步完成：上传 ${data.result.uploaded}，跳过 ${data.result.skipped}，失败 ${data.result.failed}`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "同步图片失败");
+    } finally {
+      set({ isSyncingImageStorage: false });
+    }
   },
 
   setBackupField: (key, value) => {
@@ -620,22 +723,6 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     } : {});
   },
 
-  setRegisterHeroSmsField: (key, value) => {
-    set((state) => {
-      if (!state.registerConfig) return {};
-      const numericFields = new Set(["country", "wait_timeout", "poll_interval"]);
-      return {
-        registerConfig: {
-          ...state.registerConfig,
-          hero_sms: {
-            ...state.registerConfig.hero_sms,
-            [key]: numericFields.has(String(key)) ? Number(value) || 0 : value,
-          },
-        },
-      };
-    });
-  },
-
   addRegisterProvider: () => {
     set((state) => state.registerConfig ? {
       registerConfig: {
@@ -644,7 +731,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
           ...state.registerConfig.mail,
           providers: [
             ...(state.registerConfig.mail.providers || []),
-            { enable: true, type: "tempmail_lol", api_key: "", domain: [] },
+            { enable: true, type: "cloudmail_gen", api_base: "", admin_email: "", admin_password: "", domain: [], subdomain: [], email_prefix: "" },
           ],
         },
       },
@@ -679,7 +766,6 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       set({ isSavingRegister: true });
       const data = await updateRegisterConfig({
         mail: registerConfig.mail,
-        hero_sms: normalizeRegisterHeroSmsForSave(registerConfig.hero_sms),
         proxy: registerConfig.proxy.trim(),
         total: Math.max(1, Number(registerConfig.total) || 1),
         threads: Math.max(1, Number(registerConfig.threads) || 1),
@@ -705,7 +791,6 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       if (!registerConfig.enabled) {
         await updateRegisterConfig({
           mail: registerConfig.mail,
-          hero_sms: normalizeRegisterHeroSmsForSave(registerConfig.hero_sms),
           proxy: registerConfig.proxy.trim(),
           total: Math.max(1, Number(registerConfig.total) || 1),
           threads: Math.max(1, Number(registerConfig.threads) || 1),
@@ -720,32 +805,6 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       toast.success(registerConfig.enabled ? "注册任务已停止" : "注册任务已启动");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "切换注册状态失败");
-    } finally {
-      set({ isSavingRegister: false });
-    }
-  },
-
-  startCodexRegister: async () => {
-    const { registerConfig } = get();
-    if (!registerConfig) return;
-    set({ isSavingRegister: true });
-    try {
-      await updateRegisterConfig({
-        mail: registerConfig.mail,
-        hero_sms: normalizeRegisterHeroSmsForSave(registerConfig.hero_sms),
-        proxy: registerConfig.proxy.trim(),
-        total: Math.max(1, Number(registerConfig.total) || 1),
-        threads: Math.max(1, Number(registerConfig.threads) || 1),
-        mode: registerConfig.mode,
-        target_quota: Math.max(1, Number(registerConfig.target_quota) || 1),
-        target_available: Math.max(1, Number(registerConfig.target_available) || 1),
-        check_interval: Math.max(1, Number(registerConfig.check_interval) || 5),
-      });
-      const data = await startCodexRegisterApi();
-      set({ registerConfig: data.register });
-      toast.success("Codex CPA 注册任务已启动");
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "启动 Codex CPA 注册失败");
     } finally {
       set({ isSavingRegister: false });
     }

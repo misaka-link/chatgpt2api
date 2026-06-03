@@ -13,7 +13,6 @@ from services.register_service import register_service
 
 class RegisterConfigRequest(BaseModel):
     mail: dict | None = None
-    hero_sms: dict | None = None
     proxy: str | None = None
     total: int | None = None
     threads: int | None = None
@@ -40,11 +39,6 @@ def create_router() -> APIRouter:
     async def start_register(authorization: str | None = Header(default=None)):
         require_admin(authorization)
         return {"register": register_service.start()}
-
-    @router.post("/api/register/codex/start")
-    async def start_codex_register(authorization: str | None = Header(default=None)):
-        require_admin(authorization)
-        return {"register": register_service.start_codex()}
 
     @router.post("/api/register/stop")
     async def stop_register(authorization: str | None = Header(default=None)):

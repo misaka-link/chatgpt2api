@@ -4,7 +4,6 @@ import base64
 import hashlib
 import json
 import random
-import re
 import secrets
 import string
 import threading
@@ -13,29 +12,14 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlencode, urljoin, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
-import requests
-import urllib3
-from curl_cffi import requests as curl_requests
-from requests.adapters import HTTPAdapter
+from curl_cffi import requests
 
 from services.account_service import account_service
-from services import hero_sms_country_reputation as country_reputation
-from services.hero_sms_service import HeroSmsClient
-from services.phone_broker_service import mark_country_bad, reserve_phone as resolve_activation
-from services.register import domain_reputation, mail_provider
+from services.register import mail_provider
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 base_dir = Path(__file__).resolve().parent
-HERO_SMS_DEFAULT_COUNTRY_POOL = [6, 117, 31, 33, 2, 39, 48, 37, 13, 40, 15, 8, 129, 32, 86, 173, 43, 49, 34, 7, 85, 27, 172, 63, 56, 177, 54, 24, 1, 46, 175, 14, 67, 83, 59, 187, 36]
-HERO_SMS_DEFAULT_COUNTRY_BLACKLIST = [16, 10, 4]
-HERO_SMS_MAX_WAIT_TIMEOUT = 45
-HERO_SMS_MIN_WAIT_TIMEOUT = 45
-HERO_SMS_MAX_POLL_INTERVAL = 5
-HERO_SMS_DEFAULT_SEND_RETRY_ATTEMPTS = 3
-HERO_SMS_CANCEL_RETRY_DELAYS = [95, 180]
-PASSWORD_VERIFY_RETRY_DELAYS = (1.5, 3.0, 6.0, 12.0, 0.0)
 config = {
     "mail": {
         "request_timeout": 30,
@@ -46,50 +30,11 @@ config = {
     "proxy": "",
     "total": 10,
     "threads": 3,
-    "hero_sms": {
-        "enabled": False,
-        "api_key": "",
-        "service": "dr",
-        "country": 6,
-        "country_pool": HERO_SMS_DEFAULT_COUNTRY_POOL,
-        "country_blacklist": HERO_SMS_DEFAULT_COUNTRY_BLACKLIST,
-        "operator": "any",
-        "wait_timeout": HERO_SMS_MAX_WAIT_TIMEOUT,
-        "poll_interval": 5,
-        "reuse_activation_id": "",
-        "reuse_phone": "",
-        "auto_buy": True,
-        "min_price_usd": 0.045,
-        "max_price_usd": 0.1,
-        "send_retry_attempts": HERO_SMS_DEFAULT_SEND_RETRY_ATTEMPTS,
-        "cancel_on_send_fail": True,
-    },
 }
-default_hero_sms_config = {
-    "enabled": False,
-    "api_key": "",
-    "service": "dr",
-    "country": 6,
-    "country_pool": HERO_SMS_DEFAULT_COUNTRY_POOL,
-    "country_blacklist": HERO_SMS_DEFAULT_COUNTRY_BLACKLIST,
-    "operator": "any",
-    "wait_timeout": HERO_SMS_MAX_WAIT_TIMEOUT,
-    "poll_interval": 5,
-    "reuse_activation_id": "",
-    "reuse_phone": "",
-    "auto_buy": True,
-    "min_price_usd": 0.045,
-    "max_price_usd": 0.1,
-    "send_retry_attempts": HERO_SMS_DEFAULT_SEND_RETRY_ATTEMPTS,
-    "cancel_on_send_fail": True,
-}
-
 register_config_file = base_dir.parents[1] / "data" / "register.json"
 try:
     saved_config = json.loads(register_config_file.read_text(encoding="utf-8"))
     config.update({key: saved_config[key] for key in ("mail", "proxy", "total", "threads") if key in saved_config})
-    if isinstance(saved_config.get("hero_sms"), dict):
-        config["hero_sms"] = {**default_hero_sms_config, **saved_config["hero_sms"]}
 except Exception:
     pass
 
@@ -98,8 +43,6 @@ platform_base = "https://platform.openai.com"
 platform_oauth_client_id = "app_2SKx67EdpoN0G6j64rFvigXD"
 platform_oauth_redirect_uri = f"{platform_base}/auth/callback"
 platform_oauth_audience = "https://api.openai.com/v1"
-codex_oauth_client_id = "app_EMoamEEZ73f0CkXaXp7hrann"
-codex_oauth_redirect_uri = "http://localhost:1455/auth/callback"
 platform_auth0_client = "eyJuYW1lIjoiYXV0aDAtc3BhLWpzIiwidmVyc2lvbiI6IjEuMjEuMCJ9"
 user_agent = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -114,25 +57,17 @@ stats_lock = threading.Lock()
 stats = {"done": 0, "success": 0, "fail": 0, "start_time": 0.0}
 register_log_sink = None
 
-
-def redact_sensitive_text(value: object) -> str:
-    text = str(value or "")
-    hero_sms = config.get("hero_sms") if isinstance(config.get("hero_sms"), dict) else {}
-    secrets_to_redact = [str(hero_sms.get("api_key") or "").strip()]
-    for secret in secrets_to_redact:
-        if len(secret) >= 6:
-            text = text.replace(secret, "***")
-    text = re.sub(r"(?i)(api_key=)[^&\s)]+", r"\1***", text)
-    text = re.sub(r"(?i)(Authorization:\s*ApiKey\s+)[^\s,;]+", r"\1***", text)
-    return text
-
 common_headers = {
     "accept": "application/json",
+    "accept-encoding": "gzip, deflate, br",
     "accept-language": "en-US,en;q=0.9",
+    "cache-control": "no-cache",
+    "connection": "keep-alive",
     "content-type": "application/json",
+    "dnt": "1",
     "origin": auth_base,
     "priority": "u=1, i",
-    "user-agent": user_agent,
+    "sec-gpc": "1",
     "sec-ch-ua": sec_ch_ua,
     "sec-ch-ua-arch": '"x86_64"',
     "sec-ch-ua-bitness": '"64"',
@@ -144,12 +79,17 @@ common_headers = {
     "sec-fetch-dest": "empty",
     "sec-fetch-mode": "cors",
     "sec-fetch-site": "same-origin",
+    "user-agent": user_agent,
 }
 
 navigate_headers = {
     "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "accept-encoding": "gzip, deflate, br",
     "accept-language": "en-US,en;q=0.9",
-    "user-agent": user_agent,
+    "cache-control": "max-age=0",
+    "connection": "keep-alive",
+    "dnt": "1",
+    "sec-gpc": "1",
     "sec-ch-ua": sec_ch_ua,
     "sec-ch-ua-arch": '"x86_64"',
     "sec-ch-ua-bitness": '"64"',
@@ -163,35 +103,8 @@ navigate_headers = {
     "sec-fetch-site": "same-origin",
     "sec-fetch-user": "?1",
     "upgrade-insecure-requests": "1",
+    "user-agent": user_agent,
 }
-
-platform_oauth_profile = {
-    "authorize_path": "/api/accounts/authorize",
-    "client_id": platform_oauth_client_id,
-    "redirect_uri": platform_oauth_redirect_uri,
-    "audience": platform_oauth_audience,
-    "scope": "openid profile email offline_access",
-    "referer": f"{platform_base}/",
-    "kind": "platform",
-}
-
-codex_oauth_profile = {
-    "authorize_path": "/oauth/authorize",
-    "client_id": codex_oauth_client_id,
-    "redirect_uri": codex_oauth_redirect_uri,
-    "scope": "openid profile email offline_access api.connectors.read api.connectors.invoke",
-    "referer": auth_base,
-    "kind": "codex",
-    "extra_params": {
-        "codex_cli_simplified_flow": "true",
-        "id_token_add_organizations": "true",
-        "originator": "codex_cli_rs",
-    },
-}
-
-
-def _oauth_profile(profile: dict | None = None) -> dict:
-    return profile or platform_oauth_profile
 
 
 def log(text: str, color: str = "") -> None:
@@ -224,10 +137,7 @@ def _make_trace_headers() -> dict[str, str]:
     }
 
 
-def _generate_pkce() -> tuple[str, str]:
-    code_verifier = base64.urlsafe_b64encode(secrets.token_bytes(64)).rstrip(b"=").decode("ascii")
-    code_challenge = base64.urlsafe_b64encode(hashlib.sha256(code_verifier.encode("ascii")).digest()).rstrip(b"=").decode("ascii")
-    return code_verifier, code_challenge
+from utils.pkce import generate_pkce as _generate_pkce  # noqa: F401
 
 
 def _random_password(length: int = 16) -> str:
@@ -261,15 +171,36 @@ def _response_json(resp) -> dict:
         return {}
 
 
-def _decode_jwt_payload(token: str) -> dict:
-    try:
-        payload = token.split(".")[1]
-        padding = 4 - len(payload) % 4
-        if padding != 4:
-            payload += "=" * padding
-        return json.loads(base64.urlsafe_b64decode(payload))
-    except Exception:
-        return {}
+def _response_debug_detail(resp, limit: int = 800) -> str:
+    if resp is None:
+        return ""
+    data = _response_json(resp)
+    parts = [
+        f"url={str(getattr(resp, 'url', '') or '')[:300]}",
+        f"content_type={str(getattr(resp, 'headers', {}).get('content-type') or '')}",
+    ]
+    for key in ("cf-ray", "x-request-id", "openai-processing-ms"):
+        value = str(getattr(resp, "headers", {}).get(key) or "").strip()
+        if value:
+            parts.append(f"{key}={value}")
+    if data:
+        parts.append(f"json={json.dumps(data, ensure_ascii=False)[:limit]}")
+    else:
+        parts.append(f"body={str(getattr(resp, 'text', '') or '')[:limit]}")
+    return ", ".join(parts)
+
+
+def _is_cloudflare_challenge(resp) -> bool:
+    if resp is None:
+        return False
+    text = str(getattr(resp, "text", "") or "").lower()
+    headers = getattr(resp, "headers", {}) or {}
+    server = str(headers.get("server") or "").lower()
+    return (
+        "cloudflare" in server
+        or "challenges.cloudflare.com" in text
+        or "<title>just a moment" in text
+    )
 
 
 def create_mailbox(username: str | None = None) -> dict:
@@ -280,201 +211,31 @@ def wait_for_code(mailbox: dict) -> str | None:
     return mail_provider.wait_for_code(config["mail"], mailbox)
 
 
-class RegisterAttemptError(RuntimeError):
-    def __init__(self, reason: str, mailbox: dict | None = None):
-        super().__init__(reason)
-        self.reason = str(reason)
-        self.mailbox = dict(mailbox or {})
-
-    @property
-    def mail_provider(self) -> str:
-        return str(self.mailbox.get("provider") or "").strip()
-
-    @property
-    def mail_domain(self) -> str:
-        domain = str(self.mailbox.get("domain") or "").strip().lower()
-        if domain:
-            return domain
-        address = str(self.mailbox.get("address") or "").strip().lower()
-        return address.rsplit("@", 1)[-1] if "@" in address else ""
-
-
-def _record_mail_success(result: dict) -> None:
-    provider = str(result.get("mail_provider") or "").strip()
-    domain = str(result.get("mail_domain") or "").strip()
-    if provider and domain:
-        domain_reputation.store.record_success(provider, domain)
-
-
-def _record_mail_failure(error: Exception) -> dict:
-    if not isinstance(error, RegisterAttemptError):
-        return {}
-    provider = error.mail_provider
-    domain = error.mail_domain
-    if not provider or not domain:
-        return {}
-    return domain_reputation.store.record_failure(provider, domain, error.reason)
-
-
-class SentinelTokenGenerator:
-    MAX_ATTEMPTS = 500000
-    ERROR_PREFIX = "wQ8Lk5FbGpA2NcR9dShT6gYjU7VxZ4D"
-
-    def __init__(self, device_id: str, ua: str):
-        self.device_id = device_id
-        self.user_agent = ua
-        self.sid = str(uuid.uuid4())
-
-    @staticmethod
-    def _fnv1a_32(text: str) -> str:
-        h = 2166136261
-        for ch in text:
-            h ^= ord(ch)
-            h = (h * 16777619) & 0xFFFFFFFF
-        h ^= h >> 16
-        h = (h * 2246822507) & 0xFFFFFFFF
-        h ^= h >> 13
-        h = (h * 3266489909) & 0xFFFFFFFF
-        h ^= h >> 16
-        return format(h & 0xFFFFFFFF, "08x")
-
-    def _get_config(self) -> list:
-        perf_now = random.uniform(1000, 50000)
-        return [
-            "1920x1080",
-            time.strftime("%a %b %d %Y %H:%M:%S GMT+0000 (Coordinated Universal Time)", time.gmtime()),
-            4294705152,
-            random.random(),
-            self.user_agent,
-            "https://sentinel.openai.com/sentinel/20260124ceb8/sdk.js",
-            None,
-            None,
-            "en-US",
-            random.random(),
-            random.choice(["vendorSub-undefined", "plugins-undefined", "mimeTypes-undefined", "hardwareConcurrency-undefined"]),
-            random.choice(["location", "implementation", "URL", "documentURI", "compatMode"]),
-            random.choice(["Object", "Function", "Array", "Number", "parseFloat", "undefined"]),
-            perf_now,
-            self.sid,
-            "",
-            random.choice([4, 8, 12, 16]),
-            time.time() * 1000 - perf_now,
-        ]
-
-    @staticmethod
-    def _b64(data) -> str:
-        return base64.b64encode(json.dumps(data, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).decode("ascii")
-
-    def generate_requirements_token(self) -> str:
-        data = self._get_config()
-        data[3] = 1
-        data[9] = round(random.uniform(5, 50))
-        return "gAAAAAC" + self._b64(data)
-
-    def generate_token(self, seed: str, difficulty: str) -> str:
-        start = time.time()
-        data = self._get_config()
-        difficulty = str(difficulty or "0")
-        for i in range(self.MAX_ATTEMPTS):
-            data[3] = i
-            data[9] = round((time.time() - start) * 1000)
-            payload = self._b64(data)
-            if self._fnv1a_32(seed + payload)[: len(difficulty)] <= difficulty:
-                return "gAAAAAB" + payload + "~S"
-        return "gAAAAAB" + self.ERROR_PREFIX + self._b64(str(None))
+from utils.sentinel import SentinelTokenGenerator, build_sentinel_token as _build_sentinel_token_tuple  # noqa: F401
 
 
 def build_sentinel_token(session: requests.Session, device_id: str, flow: str) -> str:
-    generator = SentinelTokenGenerator(device_id, user_agent)
-    resp = None
-    last_error = ""
-    for attempt in range(3):
-        try:
-            resp = session.post(
-                "https://sentinel.openai.com/backend-api/sentinel/req",
-                data=json.dumps({"p": generator.generate_requirements_token(), "id": device_id, "flow": flow}),
-                headers={
-                    "Content-Type": "text/plain;charset=UTF-8",
-                    "Referer": "https://sentinel.openai.com/backend-api/sentinel/frame.html",
-                    "Origin": "https://sentinel.openai.com",
-                    "User-Agent": user_agent,
-                    "sec-ch-ua": sec_ch_ua,
-                    "sec-ch-ua-mobile": "?0",
-                    "sec-ch-ua-platform": '"Windows"',
-                },
-                timeout=20,
-                verify=False,
-            )
-        except Exception as exc:
-            last_error = str(exc)
-            if attempt < 2:
-                time.sleep(0.5 * (attempt + 1))
-                continue
-            raise RuntimeError(f"sentinel_req_error: {last_error}") from exc
-        if resp.status_code == 200:
-            break
-        if resp.status_code in (429, 500, 502, 503, 504) and attempt < 2:
-            time.sleep(0.5 * (attempt + 1))
-            continue
-        break
-    data = _response_json(resp)
-    token = str(data.get("token") or "").strip()
-    if resp is None or resp.status_code != 200 or not token:
-        raise RuntimeError(f"sentinel_req_failed_{getattr(resp, 'status_code', 'unknown')}")
-    pow_data = data.get("proofofwork") or {}
-    p_value = (
-        generator.generate_token(str(pow_data.get("seed") or ""), str(pow_data.get("difficulty") or "0"))
-        if pow_data.get("required") and pow_data.get("seed")
-        else generator.generate_requirements_token()
-    )
-    return json.dumps({"p": p_value, "t": "", "c": token, "id": device_id, "flow": flow}, separators=(",", ":"))
-
-
-def _is_socks_proxy(proxy: str) -> bool:
-    candidate = str(proxy or "").strip().lower()
-    return candidate.startswith("socks5://") or candidate.startswith("socks5h://")
+    """请求 sentinel token，返回 sentinel header 字符串（兼容旧接口）。"""
+    sentinel_val, _oai_sc_val = _build_sentinel_token_tuple(session, device_id, flow, user_agent=user_agent, sec_ch_ua=sec_ch_ua)
+    return sentinel_val
 
 
 def create_session(proxy: str = "") -> Any:
-    if _is_socks_proxy(proxy):
-        return curl_requests.Session(impersonate="chrome", verify=False, proxy=proxy)
-    session = requests.Session()
-    adapter = HTTPAdapter(max_retries=0, pool_connections=100, pool_maxsize=100)
-    session.mount("http://", adapter)
-    session.mount("https://", adapter)
-    session.verify = False
+    kwargs = {"impersonate": "chrome", "verify": False}
     if proxy:
-        session.proxies.update({"http": proxy, "https": proxy})
-    return session
+        kwargs["proxy"] = proxy
+    return requests.Session(**kwargs)
 
 
-def request_with_local_retry(
-    session: requests.Session,
-    method: str,
-    url: str,
-    retry_attempts: int = 3,
-    retry_statuses: tuple[int, ...] = (),
-    **kwargs,
-):
-    kwargs.setdefault("timeout", default_timeout)
+def request_with_local_retry(session: requests.Session, method: str, url: str, retry_attempts: int = 3, **kwargs):
     last_error = ""
-    last_resp = None
-    attempts = max(1, retry_attempts)
-    for attempt in range(attempts):
+    for _ in range(max(1, retry_attempts)):
         try:
-            resp = session.request(method.upper(), url, **kwargs)
+            return session.request(method.upper(), url, timeout=default_timeout, **kwargs), ""
         except Exception as error:
             last_error = str(error)
-            if attempt < attempts - 1:
-                time.sleep(0.5 * (attempt + 1))
-            continue
-        if getattr(resp, "status_code", None) in retry_statuses and attempt < attempts - 1:
-            last_resp = resp
-            last_error = f"http_{resp.status_code}"
-            time.sleep(0.5 * (attempt + 1))
-            continue
-        return resp, ""
-    return last_resp, last_error
+            time.sleep(1)
+    return None, last_error
 
 
 def validate_otp(session: requests.Session, device_id: str, code: str):
@@ -503,407 +264,50 @@ def extract_oauth_callback_params_from_url(url: str) -> dict[str, str] | None:
     return {"code": code, "state": str((params.get("state") or [""])[0]).strip(), "scope": str((params.get("scope") or [""])[0]).strip()}
 
 
-def build_oauth_authorize_url(profile: dict | None, *, email: str, device_id: str, code_challenge: str) -> str:
-    profile = _oauth_profile(profile)
-    params = {
-        "client_id": profile["client_id"],
-        "redirect_uri": profile["redirect_uri"],
-        "scope": profile["scope"],
-        "response_type": "code",
-        "state": secrets.token_urlsafe(32),
-        "code_challenge": code_challenge,
-        "code_challenge_method": "S256",
+def request_platform_oauth_token(session: requests.Session, code: str, code_verifier: str) -> dict | None:
+    headers = {
+        "accept": "*/*",
+        "accept-language": "zh-CN,zh;q=0.9",
+        "auth0-client": platform_auth0_client,
+        "cache-control": "no-cache",
+        "content-type": "application/json",
+        "origin": platform_base,
+        "pragma": "no-cache",
+        "priority": "u=1, i",
+        "referer": f"{platform_base}/",
+        "sec-ch-ua": sec_ch_ua,
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+        "sec-fetch-dest": "empty",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-site": "same-site",
+        "user-agent": user_agent,
     }
-    if profile.get("kind") == "platform":
-        params.update(
-            {
-                "issuer": auth_base,
-                "audience": profile.get("audience") or "",
-                "device_id": device_id,
-                "screen_hint": "login_or_signup",
-                "max_age": "0",
-                "login_hint": email,
-                "response_mode": "query",
-                "nonce": secrets.token_urlsafe(32),
-                "auth0Client": platform_auth0_client,
-            }
-        )
-    else:
-        params.update(profile.get("extra_params") or {})
-        if email:
-            params["login_hint"] = email
-    return f"{auth_base}{profile['authorize_path']}?{urlencode(params)}"
-
-
-def extract_oauth_callback_params_from_response(resp) -> dict[str, str] | None:
-    def candidates_from_response(item) -> list[str]:
-        headers = getattr(item, "headers", {}) or {}
-        return [
-            str(getattr(item, "url", "") or "").strip(),
-            str(headers.get("Location") or "").strip(),
-        ]
-
-    candidates: list[str] = []
-    for history_item in getattr(resp, "history", []) or []:
-        candidates.extend(candidates_from_response(history_item))
-    candidates.extend(candidates_from_response(resp))
-
-    for candidate in candidates:
-        callback_params = extract_oauth_callback_params_from_url(candidate)
-        if callback_params:
-            return callback_params
-    return None
-
-
-def _follow_to_oauth_callback(session: requests.Session, url: str) -> dict[str, str] | None:
-    current_url = str(url or "").strip()
-    for _ in range(10):
-        callback_params = extract_oauth_callback_params_from_url(current_url)
-        if callback_params:
-            return callback_params
-        if not current_url:
-            return None
-        response, error = request_with_local_retry(
-            session,
-            "get",
-            current_url,
-            headers=navigate_headers,
-            verify=False,
-            timeout=20,
-            allow_redirects=False,
-            retry_statuses=(429, 500, 502, 503, 504),
-        )
-        if response is None:
-            raise RuntimeError(error or "consent_navigation_failed")
-        callback_params = extract_oauth_callback_params_from_response(response)
-        if callback_params:
-            return callback_params
-        location = str((getattr(response, "headers", {}) or {}).get("Location") or "").strip()
-        if getattr(response, "status_code", None) not in (301, 302, 303, 307, 308) or not location:
-            return None
-        current_url = f"{auth_base}{location}" if location.startswith("/") else location
-    return None
-
-
-def _client_auth_session_dump(session: requests.Session, device_id: str) -> dict:
-    headers = dict(common_headers)
-    headers["oai-device-id"] = device_id
-    headers.update(_make_trace_headers())
-    response, error = request_with_local_retry(
-        session,
-        "get",
-        f"{auth_base}/api/accounts/client_auth_session_dump",
+    resp = session.post(
+        f"{auth_base}/api/accounts/oauth/token",
         headers=headers,
+        json={
+            "client_id": platform_oauth_client_id,
+            "code_verifier": code_verifier,
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": platform_oauth_redirect_uri,
+        },
         verify=False,
-        timeout=20,
-        allow_redirects=False,
-        retry_statuses=(429, 500, 502, 503, 504),
+        timeout=60,
     )
-    if response is None:
-        raise RuntimeError(error or "client_auth_session_dump_failed")
-    data = _response_json(response)
-    return data if isinstance(data, dict) else {}
-
-
-def _session_workspaces_from_cookie(session: requests.Session) -> list[dict]:
-    cookies = getattr(session, "cookies", None)
-    if cookies is None:
-        return []
-    try:
-        raw = cookies.get("oai-client-auth-session", domain=".auth.openai.com") or cookies.get("oai-client-auth-session")
-    except Exception:
-        raw = None
-    if not raw:
-        return []
-    try:
-        first_part = str(raw).split(".")[0]
-        padding = 4 - len(first_part) % 4
-        if padding != 4:
-            first_part += "=" * padding
-        payload = json.loads(base64.urlsafe_b64decode(first_part))
-    except Exception:
-        return []
-    workspaces = payload.get("workspaces") if isinstance(payload, dict) else []
-    return workspaces if isinstance(workspaces, list) else []
-
-
-def extract_oauth_callback_params_from_consent_session(session: requests.Session, consent_url: str, device_id: str) -> dict[str, str] | None:
-    if consent_url.startswith("/"):
-        consent_url = f"{auth_base}{consent_url}"
-    callback_params = _follow_to_oauth_callback(session, consent_url)
-    if callback_params:
-        return callback_params
-    dump = _client_auth_session_dump(session, device_id)
-    client_auth_session = dump.get("client_auth_session") if isinstance(dump.get("client_auth_session"), dict) else {}
-    workspaces = client_auth_session.get("workspaces") if isinstance(client_auth_session, dict) else []
-    if not isinstance(workspaces, list) or not workspaces:
-        workspaces = _session_workspaces_from_cookie(session)
-    if not workspaces:
+    if resp.status_code != 200:
+        print(resp.text)
         return None
-    workspace_id = str((workspaces[0] or {}).get("id") or "").strip()
-    if not workspace_id:
-        return None
-    headers = dict(common_headers)
-    headers["referer"] = consent_url
-    headers["oai-device-id"] = device_id
-    headers.update(_make_trace_headers())
-    ws_resp, error = request_with_local_retry(
-        session,
-        "post",
-        f"{auth_base}/api/accounts/workspace/select",
-        json={"workspace_id": workspace_id},
-        headers=headers,
-        verify=False,
-        timeout=20,
-        allow_redirects=False,
-        retry_statuses=(429, 500, 502, 503, 504),
-    )
-    if ws_resp is None:
-        raise RuntimeError(error or "workspace_select_failed")
-    callback_params = extract_oauth_callback_params_from_response(ws_resp)
-    if callback_params:
-        return callback_params
-    ws_data = _response_json(ws_resp)
-    continue_url = str(ws_data.get("continue_url") or "").strip() if isinstance(ws_data, dict) else ""
-    if continue_url:
-        callback_params = _follow_to_oauth_callback(session, continue_url)
-        if callback_params:
-            return callback_params
-    orgs = ((ws_data.get("data") or {}).get("orgs") or []) if isinstance(ws_data, dict) else []
-    if not orgs:
-        return None
-    org_id = str((orgs[0] or {}).get("id") or "").strip()
-    project_id = str(((orgs[0] or {}).get("projects") or [{}])[0].get("id") or "").strip()
-    if not org_id:
-        return None
-    org_headers = dict(common_headers)
-    org_headers["referer"] = str(ws_data.get("continue_url") or consent_url)
-    org_headers["oai-device-id"] = device_id
-    org_headers.update(_make_trace_headers())
-    body = {"org_id": org_id}
-    if project_id:
-        body["project_id"] = project_id
-    org_resp, error = request_with_local_retry(
-        session,
-        "post",
-        f"{auth_base}/api/accounts/organization/select",
-        json=body,
-        headers=org_headers,
-        verify=False,
-        timeout=20,
-        allow_redirects=False,
-        retry_statuses=(429, 500, 502, 503, 504),
-    )
-    if org_resp is None:
-        raise RuntimeError(error or "organization_select_failed")
-    return extract_oauth_callback_params_from_url(str(org_resp.headers.get("Location") or "").strip())
-
-
-def _response_error_detail(resp) -> str:
-    if resp is None:
-        return ""
-    data = _response_json(resp)
-    if data:
-        return f", detail={json.dumps(data, ensure_ascii=False)[:800]}"
-    text = str(getattr(resp, "text", "") or "").strip()
-    return f", body={text[:800]}" if text else ""
-
-
-def _e164_phone(phone: str) -> str:
-    digits = "".join(ch for ch in str(phone or "") if ch.isdigit())
-    if not digits:
-        raise RuntimeError("HeroSMS 未返回手机号")
-    return f"+{digits}"
-
-
-def _bounded_positive_float(value: object, *, default: float, upper: float) -> float:
-    try:
-        parsed = float(value)
-    except Exception:
-        return default
-    if parsed <= 0:
-        return default
-    return min(parsed, upper)
-
-
-def _hero_sms_wait_timeout(hero_sms: dict) -> float:
-    return max(
-        HERO_SMS_MIN_WAIT_TIMEOUT,
-        _bounded_positive_float(hero_sms.get("wait_timeout"), default=HERO_SMS_MAX_WAIT_TIMEOUT, upper=HERO_SMS_MAX_WAIT_TIMEOUT),
-    )
-
-
-def _hero_sms_poll_interval(hero_sms: dict) -> float:
-    return _bounded_positive_float(hero_sms.get("poll_interval"), default=HERO_SMS_MAX_POLL_INTERVAL, upper=HERO_SMS_MAX_POLL_INTERVAL)
-
-
-def _record_hero_sms_event(activation: Any, event: str, reason: str = "") -> None:
-    try:
-        country_reputation.store.record_event(
-            getattr(activation, "country", None),
-            event,
-            price=getattr(activation, "price", None),
-            reason=redact_sensitive_text(reason),
-        )
-    except Exception:
-        pass
-
-
-def _hero_sms_meta(activation: Any) -> dict:
-    meta: dict[str, Any] = {}
-    try:
-        country = getattr(activation, "country", None)
-        if country is not None:
-            meta["country"] = int(country)
-    except Exception:
-        pass
-    try:
-        price = getattr(activation, "price", None)
-        if price is not None:
-            meta["price"] = float(price)
-    except Exception:
-        pass
-    return meta
-
-
-def _password_verify_retryable(resp) -> bool:
-    if getattr(resp, "status_code", None) != 401:
-        return False
-    data = _response_json(resp)
-    error = data.get("error") if isinstance(data, dict) else {}
-    return str((error or {}).get("code") or "").strip() == "invalid_username_or_password"
-
-
-def _hero_sms_cancel_retry_delays(hero_sms: dict) -> list[float]:
-    raw = hero_sms.get("cancel_retry_delays") if isinstance(hero_sms, dict) else None
-    values = raw if isinstance(raw, (list, tuple)) else HERO_SMS_CANCEL_RETRY_DELAYS
-    delays: list[float] = []
-    for item in values:
-        try:
-            delay = float(item)
-        except Exception:
-            continue
-        if delay > 0:
-            delays.append(delay)
-    return delays or list(HERO_SMS_CANCEL_RETRY_DELAYS)
-
-
-def _schedule_hero_sms_cancel_retry(api_key: str, activation_id: str, reason: str, index: int, hero_sms: dict | None = None) -> None:
-    api_key = str(api_key or "").strip()
-    activation_id = str(activation_id or "").strip()
-    if not api_key or not activation_id:
-        return
-    hero_sms = hero_sms if isinstance(hero_sms, dict) else {}
-    delays = _hero_sms_cancel_retry_delays(hero_sms)
-
-    def retry() -> None:
-        for attempt, delay in enumerate(delays, start=1):
-            time.sleep(delay)
-            retry_client = HeroSmsClient(api_key, poll_interval=_hero_sms_poll_interval(hero_sms))
-            try:
-                retry_client.cancel(activation_id)
-                step(index, f"{reason}，延迟 cancel 成功 HeroSMS activation={activation_id}", "yellow")
-                return
-            except Exception as exc:
-                if attempt >= len(delays):
-                    step(index, f"{reason}，延迟 cancel 仍失败 HeroSMS activation={activation_id}: {exc}", "yellow")
-            finally:
-                try:
-                    retry_client.close()
-                except Exception:
-                    pass
-
-    threading.Thread(target=retry, daemon=True, name=f"hero-sms-cancel-{activation_id}").start()
-
-
-def _continue_url_from_auth_payload(payload: dict) -> str:
-    continue_url = str(payload.get("continue_url") or "").strip()
-    if continue_url:
-        return continue_url
-    page = payload.get("page") or {}
-    page_type = str(page.get("type") or "").strip()
-    page_paths = {
-        "phone_otp_verification": "/phone-verification",
-        "sign_in_with_chatgpt_consent": "/sign-in-with-chatgpt/consent",
-        "sign_in_with_chatgpt_codex_consent": "/sign-in-with-chatgpt/codex/consent",
-        "sign_in_with_chatgpt_codex_org": "/sign-in-with-chatgpt/codex/organization",
-        "workspace": "/workspace",
-    }
-    path = page_paths.get(page_type)
-    return f"{auth_base}{path}" if path else ""
-
-
-def _auth_response_hint(resp) -> str:
-    data = _response_json(resp)
-    page_type = str(((data.get("page") or {}).get("type")) or "").strip()
-    continue_url = _continue_url_from_auth_payload(data)
-    location = str((getattr(resp, "headers", {}) or {}).get("Location") or "").strip()
-    url = str(getattr(resp, "url", "") or "").strip()
-    parts = [f"status={getattr(resp, 'status_code', '-') }"]
-    if page_type:
-        parts.append(f"page_type={page_type}")
-    if continue_url:
-        parsed = urlparse(continue_url)
-        parts.append(f"continue={parsed.scheme}://{parsed.netloc}{parsed.path}" if parsed.scheme and parsed.netloc else f"continue={continue_url[:120]}")
-    if location:
-        parsed = urlparse(urljoin(url or auth_base, location))
-        parts.append(f"location={parsed.scheme}://{parsed.netloc}{parsed.path}" if parsed.scheme and parsed.netloc else f"location={location[:120]}")
-    return ", ".join(parts)
-
-
-def exchange_oauth_callback_params(code_verifier: str, callback_params: dict[str, str], profile: dict | None = None) -> dict | None:
-    code = str(callback_params.get("code") or "").strip()
-    if not code:
-        return None
-    profile = _oauth_profile(profile)
-    session = create_session(config["proxy"])
-    try:
-        resp, error = request_with_local_retry(
-            session,
-            "post",
-            f"{auth_base}/oauth/token",
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            data={
-                "grant_type": "authorization_code",
-                "code": code,
-                "redirect_uri": profile["redirect_uri"],
-                "client_id": profile["client_id"],
-                "code_verifier": code_verifier,
-            },
-            verify=False,
-            timeout=20,
-            retry_statuses=(429, 500, 502, 503, 504),
-        )
-    finally:
-        try:
-            session.close()
-        except Exception:
-            pass
-    if resp is None:
-        raise RuntimeError(error or "oauth_token_exchange_failed")
-    data = _response_json(resp)
-    if resp.status_code != 200 or not data.get("access_token") or not data.get("refresh_token") or not data.get("id_token"):
-        return None
-    payload = _decode_jwt_payload(str(data.get("id_token") or "")) or _decode_jwt_payload(str(data.get("access_token") or ""))
-    return {
-        "email": str(payload.get("email") or "").strip(),
-        "access_token": str(data.get("access_token") or "").strip(),
-        "refresh_token": str(data.get("refresh_token") or "").strip(),
-        "id_token": str(data.get("id_token") or "").strip(),
-    }
-
-
-def exchange_platform_tokens(session: requests.Session, device_id: str, code_verifier: str, consent_url: str, profile: dict | None = None) -> dict | None:
-    callback_params = extract_oauth_callback_params_from_consent_session(session, consent_url, device_id)
-    if not callback_params:
-        return None
-    return exchange_oauth_callback_params(code_verifier, callback_params, profile=profile)
+    return _response_json(resp)
 
 
 class PlatformRegistrar:
     def __init__(self, proxy: str = "") -> None:
         self.session = create_session(proxy)
         self.device_id = str(uuid.uuid4())
+        self.code_verifier = ""
+        self.platform_auth_code = ""
 
     def close(self) -> None:
         self.session.close()
@@ -921,256 +325,39 @@ class PlatformRegistrar:
         headers.update(_make_trace_headers())
         return headers
 
-    def _follow_auth_internal_redirects(self, resp, index: int):
-        current = resp
-        for _ in range(5):
-            callback_params = extract_oauth_callback_params_from_response(current)
-            if callback_params:
-                return current, callback_params
-            location = str((getattr(current, "headers", {}) or {}).get("Location") or "").strip()
-            if getattr(current, "status_code", None) not in (301, 302, 303, 307, 308) or not location:
-                return current, None
-            next_url = urljoin(str(getattr(current, "url", "") or auth_base), location)
-            next_parsed = urlparse(next_url)
-            if next_parsed.scheme not in ("http", "https") or next_parsed.netloc != "auth.openai.com":
-                return current, None
-            if next_parsed.path not in ("/api/oauth/oauth2/auth", "/api/accounts/login", "/log-in/password"):
-                return current, None
-            step(index, f"跟随 auth 内部跳转 {next_parsed.path}")
-            next_resp, error = request_with_local_retry(
-                self.session,
-                "get",
-                next_url,
-                headers=self._navigate_headers(str(getattr(current, "url", "") or auth_base)),
-                allow_redirects=False,
-                verify=False,
-                timeout=20,
-                retry_statuses=(429, 500, 502, 503, 504),
-            )
-            if next_resp is None:
-                raise RuntimeError(error or "auth_internal_redirect_failed")
-            current = next_resp
-        return current, extract_oauth_callback_params_from_response(current)
-
-    def _login_username_required(self, resp) -> bool:
-        candidates = [
-            str(getattr(resp, "url", "") or "").strip(),
-            str((getattr(resp, "headers", {}) or {}).get("Location") or "").strip(),
-        ]
-        for candidate in candidates:
-            if not candidate:
-                continue
-            parsed = urlparse(urljoin(auth_base, candidate))
-            if parsed.netloc == "auth.openai.com" and parsed.path in {"/api/accounts/login", "/log-in"}:
-                return True
-        return False
-
-    def _login_password_page_loaded(self, resp) -> bool:
-        candidates = [
-            str(getattr(resp, "url", "") or "").strip(),
-            str((getattr(resp, "headers", {}) or {}).get("Location") or "").strip(),
-        ]
-        for candidate in candidates:
-            if not candidate:
-                continue
-            parsed = urlparse(urljoin(auth_base, candidate))
-            if parsed.netloc == "auth.openai.com" and parsed.path == "/log-in/password":
-                return True
-        return False
-
-    def _submit_login_username(self, email: str, referer: str, index: int) -> str:
-        step(index, "Codex login 提交 username")
-        headers = self._json_headers(referer or f"{auth_base}/log-in")
-        resp, error = request_with_local_retry(
-            self.session,
-            "post",
-            f"{auth_base}/api/accounts/authorize/continue",
-            json={"username": {"value": email, "kind": "email"}, "screen_hint": "login_or_signup"},
-            headers=headers,
-            allow_redirects=False,
-            verify=False,
-            timeout=20,
-            retry_statuses=(429, 500, 502, 503, 504),
-        )
-        if resp is None or resp.status_code not in (200, 302):
-            raise RuntimeError(error or f"login_username_continue_http_{getattr(resp, 'status_code', 'unknown')}{_response_error_detail(resp)}")
-        payload = _response_json(resp)
-        continue_url = str(payload.get("continue_url") or "").strip()
-        location = str((getattr(resp, "headers", {}) or {}).get("Location") or "").strip()
-        return continue_url or (urljoin(auth_base, location) if location else f"{auth_base}/log-in/password")
-
-    def _handle_codex_add_phone(self, continue_url: str, index: int) -> str:
-        hero_sms = config.get("hero_sms") if isinstance(config.get("hero_sms"), dict) else {}
-        if not hero_sms.get("enabled"):
-            raise RuntimeError("Codex OAuth 需要 add_phone，但 HeroSMS 未启用")
-        api_key = str(hero_sms.get("api_key") or "").strip()
-        if not api_key:
-            raise RuntimeError("Codex OAuth 需要 add_phone，但 HeroSMS API Key 为空")
-
-        country_pool = hero_sms.get("country_pool") if isinstance(hero_sms.get("country_pool"), list) else []
-        country_blacklist = hero_sms.get("country_blacklist") if isinstance(hero_sms.get("country_blacklist"), list) else []
-        step(
-            index,
-            "HeroSMS 开始买号: "
-            f"service={hero_sms.get('service') or 'dr'}, "
-            f"min_price_usd={hero_sms.get('min_price_usd') or 0}, "
-            f"max_price_usd={hero_sms.get('max_price_usd') or 0.1}, "
-            f"pool_head={(country_pool or [hero_sms.get('country') or 6])[:8]}, "
-            f"blacklist={country_blacklist}",
-        )
-        try:
-            send_retry_attempts = int(hero_sms.get("send_retry_attempts") or HERO_SMS_DEFAULT_SEND_RETRY_ATTEMPTS)
-        except Exception:
-            send_retry_attempts = HERO_SMS_DEFAULT_SEND_RETRY_ATTEMPTS
-        send_retry_attempts = max(1, min(8, send_retry_attempts))
-        last_send_error = ""
-        attempted_countries: set[int] = set()
-
-        for send_attempt in range(1, send_retry_attempts + 1):
-            activation_config = dict(hero_sms)
-            if attempted_countries:
-                base_blacklist = hero_sms.get("country_blacklist") if isinstance(hero_sms.get("country_blacklist"), list) else []
-                activation_config["country_blacklist"] = list(dict.fromkeys([*base_blacklist, *sorted(attempted_countries)]))
-            activation = resolve_activation(activation_config, on_event=lambda message: step(index, message))
-            phone_number = _e164_phone(str(activation.phone or ""))
-            country_note = f", country={activation.country}" if getattr(activation, "country", None) else ""
-            step(index, f"add_phone 使用 HeroSMS activation={activation.activation_id}{country_note}, phone=***{phone_number[-4:]}")
-
-            client = HeroSmsClient(
-                api_key,
-                poll_interval=_hero_sms_poll_interval(hero_sms),
-            )
-
-            def cancel_activation(reason: str) -> None:
-                try:
-                    client.cancel(str(activation.activation_id))
-                    step(index, f"{reason}，已 cancel HeroSMS activation={activation.activation_id}", "yellow")
-                except Exception as exc:
-                    step(index, f"{reason}，HeroSMS cancel 失败: {exc}，已安排延迟重试", "yellow")
-                    _schedule_hero_sms_cancel_retry(api_key, str(activation.activation_id), reason, index, hero_sms)
-
-            try:
-                try:
-                    activation_status = client.get_status(str(activation.activation_id))
-                except Exception as exc:
-                    activation_status = "STATUS_WAIT_CODE"
-                    step(index, f"HeroSMS activation 状态预检失败，继续发送验证码: {redact_sensitive_text(exc)}", "yellow")
-                if activation_status not in {"STATUS_WAIT_CODE", "STATUS_WAIT_RETRY", "STATUS_WAIT_RESEND"}:
-                    raise RuntimeError(f"HeroSMS activation 不可用: {activation_status}")
-                send_resp, error = request_with_local_retry(
-                    self.session,
-                    "post",
-                    f"{auth_base}/api/accounts/add-phone/send",
-                    json={"phone_number": phone_number},
-                    headers=self._json_headers(continue_url or f"{auth_base}/add-phone"),
-                    verify=False,
-                    timeout=20,
-                    retry_statuses=(429, 500, 502, 503, 504),
-                )
-                if send_resp is None or send_resp.status_code != 200:
-                    data = _response_json(send_resp) if send_resp is not None else {}
-                    code_text = str(((data.get("error") or {}).get("code") if isinstance(data, dict) else "") or "").strip()
-                    retryable_send_error = code_text in {"phone_number_in_use", "fraud_guard"}
-                    if code_text == "fraud_guard":
-                        mark_country_bad(getattr(activation, "country", None), f"add_phone_send_failed:{code_text or 'unknown'}")
-                    _record_hero_sms_event(activation, code_text if code_text in {"phone_number_in_use", "fraud_guard"} else "send_fail", f"add_phone_send_failed:{code_text or 'unknown'}")
-                    cancel_activation("add_phone_send 失败")
-                    last_send_error = error or f"add_phone_send_http_{getattr(send_resp, 'status_code', 'unknown')}{_response_error_detail(send_resp)}"
-                    if retryable_send_error and send_attempt < send_retry_attempts:
-                        try:
-                            attempted_countries.add(int(getattr(activation, "country", 0) or 0))
-                        except Exception:
-                            pass
-                        step(index, f"add_phone_send 可换号重试: {code_text}，attempt={send_attempt}/{send_retry_attempts}", "yellow")
-                        continue
-                    raise RuntimeError(last_send_error)
-                phone_verify_url = _continue_url_from_auth_payload(_response_json(send_resp)) or f"{auth_base}/phone-verification"
-                _record_hero_sms_event(activation, "send_ok")
-                step(index, "add_phone 发送验证码完成")
-
-                nav_resp, error = request_with_local_retry(
-                    self.session,
-                    "get",
-                    phone_verify_url,
-                    headers=self._navigate_headers(continue_url or f"{auth_base}/add-phone"),
-                    allow_redirects=True,
-                    verify=False,
-                    timeout=20,
-                    retry_statuses=(429, 500, 502, 503, 504),
-                )
-                if nav_resp is None or getattr(nav_resp, "status_code", 0) >= 400:
-                    cancel_activation("phone_verification 页面失败")
-                    raise RuntimeError(error or f"phone_verification_page_http_{getattr(nav_resp, 'status_code', 'unknown')}{_response_error_detail(nav_resp)}")
-
-                try:
-                    code = client.poll_code(str(activation.activation_id), timeout=_hero_sms_wait_timeout(hero_sms))
-                except Exception as exc:
-                    sms_timeout = "sms_code_timeout" in str(exc)
-                    if sms_timeout:
-                        _record_hero_sms_event(activation, "sms_code_timeout", str(exc))
-                    cancel_activation("等待 HeroSMS 验证码失败")
-                    if sms_timeout and send_attempt < send_retry_attempts:
-                        try:
-                            attempted_countries.add(int(getattr(activation, "country", 0) or 0))
-                        except Exception:
-                            pass
-                        step(index, f"HeroSMS 收码超时，换号重试 attempt={send_attempt}/{send_retry_attempts}", "yellow")
-                        continue
-                    raise
-                _record_hero_sms_event(activation, "sms_ok")
-                step(index, f"HeroSMS 收到 add_phone 验证码: {code}")
-                verify_resp, error = request_with_local_retry(
-                    self.session,
-                    "post",
-                    f"{auth_base}/api/accounts/phone-otp/validate",
-                    json={"code": code},
-                    headers=self._json_headers(phone_verify_url),
-                    verify=False,
-                    timeout=20,
-                    retry_statuses=(429, 500, 502, 503, 504),
-                )
-                if verify_resp is None or verify_resp.status_code != 200:
-                    _record_hero_sms_event(activation, "phone_otp_validate_fail", _response_error_detail(verify_resp) or error)
-                    raise RuntimeError(error or f"phone_otp_validate_http_{getattr(verify_resp, 'status_code', 'unknown')}{_response_error_detail(verify_resp)}")
-                next_url = _continue_url_from_auth_payload(_response_json(verify_resp))
-                if not next_url:
-                    raise RuntimeError(f"phone_otp_validate_missing_continue{_response_error_detail(verify_resp)}")
-                try:
-                    client.finish(str(activation.activation_id))
-                except Exception as exc:
-                    step(index, f"HeroSMS finish 失败: {exc}", "yellow")
-                _record_hero_sms_event(activation, "add_phone_success")
-                self._last_hero_sms = _hero_sms_meta(activation)
-                step(index, "add_phone 验证完成")
-                return next_url
-            finally:
-                try:
-                    client.close()
-                except Exception:
-                    pass
-        raise RuntimeError(last_send_error or "add_phone_send_failed")
-
-    def _platform_authorize(self, email: str, index: int) -> str:
+    def _platform_authorize(self, email: str, index: int) -> None:
         step(index, "开始 platform authorize")
         self.session.cookies.set("oai-did", self.device_id, domain=".auth.openai.com")
         self.session.cookies.set("oai-did", self.device_id, domain="auth.openai.com")
-        code_verifier, code_challenge = _generate_pkce()
-        resp, error = request_with_local_retry(
-            self.session,
-            "get",
-            build_oauth_authorize_url(platform_oauth_profile, email=email, device_id=self.device_id, code_challenge=code_challenge),
-            headers=self._navigate_headers(f"{platform_base}/"),
-            allow_redirects=False,
-            verify=False,
-            timeout=20,
-            retry_statuses=(429, 500, 502, 503, 504),
-        )
-        if resp is None or resp.status_code not in (200, 301, 302, 303, 307, 308):
+        self.code_verifier, code_challenge = _generate_pkce()
+        params = {
+            "issuer": auth_base,
+            "client_id": platform_oauth_client_id,
+            "audience": platform_oauth_audience,
+            "redirect_uri": platform_oauth_redirect_uri,
+            "device_id": self.device_id,
+            "screen_hint": "login_or_signup",
+            "max_age": "0",
+            "login_hint": email,
+            "scope": "openid profile email offline_access",
+            "response_type": "code",
+            "response_mode": "query",
+            "state": secrets.token_urlsafe(32),
+            "nonce": secrets.token_urlsafe(32),
+            "code_challenge": code_challenge,
+            "code_challenge_method": "S256",
+            "auth0Client": platform_auth0_client,
+        }
+        resp, error = request_with_local_retry(self.session, "get", f"{auth_base}/api/accounts/authorize?{urlencode(params)}", headers=self._navigate_headers(f"{platform_base}/"), allow_redirects=True, verify=False)
+        if resp is None or resp.status_code != 200:
             err = _response_json(resp).get("error", {}) if resp is not None else {}
             detail = f": {err.get('code', '')} - {err.get('message', '')}".strip(" -") if err else ""
-            raise RuntimeError(error or f"platform_authorize_http_{getattr(resp, 'status_code', 'unknown')}{detail}")
+            if _is_cloudflare_challenge(resp):
+                raise RuntimeError("被 Cloudflare 拦截，请更换 IP 重试")
+            debug = _response_debug_detail(resp)
+            status = getattr(resp, "status_code", "unknown")
+            raise RuntimeError(error or f"platform_authorize_http_{status}{detail}, {debug}")
         step(index, "platform authorize 完成")
-        return code_verifier
 
     def _register_user(self, email: str, password: str, index: int) -> None:
         step(index, "开始提交注册密码")
@@ -1183,7 +370,6 @@ class PlatformRegistrar:
                 step(index, "注册失败提示: 邮箱域名很可能因滥用被封禁，请更换邮箱域名", "yellow")
             detail = f", detail={json.dumps(data, ensure_ascii=False)}" if data else ""
             raise RuntimeError(error or f"user_register_http_{getattr(resp, 'status_code', 'unknown')}{detail}")
-        step(index, f"提交注册密码响应: {_auth_response_hint(resp)}")
         step(index, "提交注册密码完成")
 
     def _send_otp(self, index: int) -> None:
@@ -1197,11 +383,15 @@ class PlatformRegistrar:
         step(index, f"开始校验验证码 {code}")
         resp, error = validate_otp(self.session, self.device_id, code)
         if resp is None or resp.status_code != 200:
-            raise RuntimeError(error or f"validate_otp_http_{getattr(resp, 'status_code', 'unknown')}")
-        step(index, f"验证码校验响应: {_auth_response_hint(resp)}")
+            body = ""
+            try:
+                body = (resp.text or "")[:500] if resp is not None else ""
+            except Exception:
+                pass
+            raise RuntimeError(error or f"validate_otp_http_{getattr(resp, 'status_code', 'unknown')}_body={body}")
         step(index, "验证码校验完成")
 
-    def _create_account(self, name: str, birthdate: str, index: int) -> str:
+    def _create_account(self, name: str, birthdate: str, index: int) -> None:
         step(index, "开始创建账号资料")
         headers = self._json_headers(f"{auth_base}/about-you")
         headers["openai-sentinel-token"] = build_sentinel_token(self.session, self.device_id, "oauth_create_account")
@@ -1212,188 +402,49 @@ class PlatformRegistrar:
                 step(index, "创建账号失败提示: 邮箱域名很可能因滥用被封禁，请更换邮箱域名", "yellow")
             detail = f", detail={json.dumps(data, ensure_ascii=False)}" if data else ""
             raise RuntimeError(error or f"create_account_http_{getattr(resp, 'status_code', 'unknown')}{detail}")
-        step(index, f"创建账号资料响应: {_auth_response_hint(resp)}")
+        data = _response_json(resp)
+        callback_params = extract_oauth_callback_params_from_url(str(data.get("continue_url") or "").strip())
+        self.platform_auth_code = str((callback_params or {}).get("code") or "").strip()
         step(index, "创建账号资料完成")
-        return _continue_url_from_auth_payload(_response_json(resp))
 
-    def _tokens_from_create_account_callback(self, code_verifier: str, continue_url: str, index: int) -> dict | None:
-        callback_params = extract_oauth_callback_params_from_url(continue_url)
-        if not callback_params:
-            return None
-        tokens = exchange_oauth_callback_params(code_verifier, callback_params)
-        if tokens:
-            step(index, "创建账号资料已返回 OAuth code，跳过独立登录")
-            return tokens
-        step(index, "创建账号资料返回 OAuth code，但 token 换取失败，回退独立登录", "yellow")
-        return None
-
-    def _login_and_exchange_tokens(self, email: str, password: str, mailbox: dict, index: int, profile: dict | None = None) -> dict:
-        step(index, "开始独立登录换 token")
-        profile = _oauth_profile(profile)
-        code_verifier, code_challenge = _generate_pkce()
-        resp, error = request_with_local_retry(
-            self.session,
-            "get",
-            build_oauth_authorize_url(profile, email=email, device_id=self.device_id, code_challenge=code_challenge),
-            headers=self._navigate_headers(str(profile.get("referer") or f"{platform_base}/")),
-            allow_redirects=False,
-            verify=False,
-            timeout=20,
-            retry_statuses=(429, 500, 502, 503, 504),
-        )
-        if resp is None:
-            raise RuntimeError(error or "platform_login_authorize_failed")
-        step(index, "登录 authorize 完成")
-        if profile.get("kind") == "codex":
-            resp, callback_params = self._follow_auth_internal_redirects(resp, index)
-        else:
-            callback_params = extract_oauth_callback_params_from_response(resp)
-        if callback_params:
-            tokens = exchange_oauth_callback_params(code_verifier, callback_params, profile=profile)
-            if tokens:
-                step(index, "authorize 已返回 OAuth code，跳过密码校验")
-                return tokens
-            step(index, "authorize 已返回 OAuth code，但 token 换取失败，继续尝试密码校验", "yellow")
-        password_referer = f"{auth_base}/log-in/password"
-        if profile.get("kind") == "codex":
-            if self._login_username_required(resp) or self._login_password_page_loaded(resp):
-                password_referer = self._submit_login_username(email, str(getattr(resp, "url", "") or auth_base), index)
-        resp = None
-        error = ""
-        for attempt, delay in enumerate(PASSWORD_VERIFY_RETRY_DELAYS, start=1):
-            headers = self._json_headers(password_referer)
-            headers["openai-sentinel-token"] = build_sentinel_token(self.session, self.device_id, "password_verify")
-            resp, error = request_with_local_retry(
-                self.session,
-                "post",
-                f"{auth_base}/api/accounts/password/verify",
-                json={"password": password},
-                headers=headers,
-                allow_redirects=False,
-                verify=False,
-            )
-            if resp is not None and resp.status_code == 200:
-                break
-            if resp is not None and _password_verify_retryable(resp) and delay > 0:
-                step(index, f"password_verify 返回 401，等待 {delay:g}s 后重试", "yellow")
-                time.sleep(delay)
-                continue
-            break
-        if resp is None or resp.status_code != 200:
-            raise RuntimeError(error or f"password_verify_http_{getattr(resp, 'status_code', 'unknown')}{_response_error_detail(resp)}")
-        step(index, "密码校验完成")
-        payload = _response_json(resp)
-        continue_url = str(payload.get("continue_url") or "").strip()
-        page_type = str(((payload.get("page") or {}).get("type")) or "")
-        if profile.get("kind") == "codex":
-            parsed_continue = urlparse(continue_url) if continue_url else None
-            continue_hint = (
-                f"{parsed_continue.scheme}://{parsed_continue.netloc}{parsed_continue.path}"
-                if parsed_continue and parsed_continue.scheme and parsed_continue.netloc
-                else continue_url[:160]
-            )
-            step(index, f"Codex password_verify 返回 page_type={page_type or '-'}, continue_url={continue_hint or '-'}")
-            if page_type == "add_phone" and continue_url:
-                try:
-                    debug_dir = base_dir.parents[1] / "data" / "debug" / "add_phone_runtime"
-                    debug_dir.mkdir(parents=True, exist_ok=True)
-                    add_phone_resp, _ = request_with_local_retry(
-                        self.session,
-                        "get",
-                        continue_url,
-                        headers=self._navigate_headers(continue_url),
-                        allow_redirects=True,
-                        verify=False,
-                        timeout=20,
-                        retry_statuses=(429, 500, 502, 503, 504),
-                    )
-                    if add_phone_resp is not None:
-                        debug_dir.joinpath("add_phone.html").write_text(str(getattr(add_phone_resp, "text", "") or ""), encoding="utf-8")
-                        debug_dir.joinpath("add_phone_meta.json").write_text(
-                            json.dumps(
-                                {
-                                    "status_code": getattr(add_phone_resp, "status_code", None),
-                                    "url": str(getattr(add_phone_resp, "url", "") or ""),
-                                    "content_type": str((getattr(add_phone_resp, "headers", {}) or {}).get("content-type") or ""),
-                                },
-                                ensure_ascii=False,
-                                indent=2,
-                            ),
-                            encoding="utf-8",
-                        )
-                except Exception as exc:
-                    step(index, f"add_phone 页面诊断失败: {exc}", "yellow")
-                continue_url = self._handle_codex_add_phone(continue_url, index)
-                page_type = ""
-        if page_type == "email_otp_verification" or "email-verification" in continue_url or "email-otp" in continue_url:
-            step(index, "独立登录需要邮箱验证码")
-            code = wait_for_code(mailbox)
-            if not code:
-                raise RuntimeError("独立登录等待验证码超时")
-            resp, reason = validate_otp(self.session, self.device_id, code)
-            if resp is None or resp.status_code != 200:
-                print("独立登录验证码校验失败响应:", resp.text if resp is not None else "None")
-                data = _response_json(resp) if resp is not None else {}
-                message = str((data.get("error") or {}).get("message") or data.get("message") or "").strip()
-                raise RuntimeError(reason or f"独立登录验证码校验失败{': ' + message if message else ''}")
-            otp_payload = _response_json(resp)
-            continue_url = str(otp_payload.get("continue_url") or continue_url).strip()
-            step(index, "独立登录验证码校验完成")
-        if not continue_url:
-            continue_url = f"{auth_base}/sign-in-with-chatgpt/codex/consent"
-        tokens = exchange_platform_tokens(self.session, self.device_id, code_verifier, continue_url, profile=profile)
+    def _exchange_registered_tokens(self, index: int) -> dict:
+        step(index, "开始换 token")
+        tokens = request_platform_oauth_token(self.session, self.platform_auth_code, self.code_verifier)
         if not tokens:
-            raise RuntimeError(f"token换取失败: page_type={page_type or '-'}, continue_url={continue_url[:240] or '-'}")
+            raise RuntimeError("token换取失败")
         step(index, "token 换取完成")
         return tokens
 
-    def register(self, index: int, profile: dict | None = None) -> dict:
-        mailbox: dict = {}
-        try:
-            step(index, "开始创建邮箱")
-            mailbox = create_mailbox()
-            email = str(mailbox.get("address") or "").strip()
-            if not email:
-                raise RuntimeError("邮箱服务未返回 address")
-            step(index, f"邮箱创建完成: {email}")
-            password = _random_password()
-            first_name, last_name = _random_name()
-            platform_code_verifier = self._platform_authorize(email, index)
-            self._register_user(email, password, index)
-            self._send_otp(index)
-            step(index, "开始等待注册验证码")
-            code = wait_for_code(mailbox)
-            if not code:
-                raise RuntimeError("等待注册验证码超时")
-            step(index, f"收到注册验证码: {code}")
-            self._validate_otp(code, index)
-            create_account_continue_url = self._create_account(f"{first_name} {last_name}", _random_birthdate(), index)
-            tokens = None
-            if _oauth_profile(profile).get("kind") == "platform":
-                tokens = self._tokens_from_create_account_callback(platform_code_verifier, create_account_continue_url, index)
-            if not tokens:
-                tokens = self._login_and_exchange_tokens(email, password, mailbox, index, profile=profile)
-            result = {
-                "email": email,
-                "password": password,
-                "access_token": str(tokens.get("access_token") or "").strip(),
-                "refresh_token": str(tokens.get("refresh_token") or "").strip(),
-                "id_token": str(tokens.get("id_token") or "").strip(),
-                "mail_provider": str(mailbox.get("provider") or "").strip(),
-                "mail_provider_ref": str(mailbox.get("provider_ref") or "").strip(),
-                "mail_domain": str(mailbox.get("domain") or (email.rsplit("@", 1)[-1] if "@" in email else "")).strip().lower(),
-                "created_at": datetime.now(timezone.utc).isoformat(),
-            }
-            hero_sms_meta = getattr(self, "_last_hero_sms", None)
-            if isinstance(hero_sms_meta, dict) and hero_sms_meta:
-                result["hero_sms"] = hero_sms_meta
-            return result
-        except RegisterAttemptError:
-            raise
-        except Exception as exc:
-            if mailbox:
-                raise RegisterAttemptError(str(exc), mailbox) from exc
-            raise
+    def register(self, index: int) -> dict:
+        step(index, "开始创建邮箱")
+        mailbox = create_mailbox()
+        email = str(mailbox.get("address") or "").strip()
+        if not email:
+            raise RuntimeError("邮箱服务未返回 address")
+        label = str(mailbox.get("label") or "")
+        step(index, f"邮箱创建完成[{label}]: {email}")
+        password = _random_password()
+        first_name, last_name = _random_name()
+        self._platform_authorize(email, index)
+        self._register_user(email, password, index)
+        self._send_otp(index)
+        step(index, "开始等待注册验证码")
+        code = wait_for_code(mailbox)
+        if not code:
+            raise RuntimeError("等待注册验证码超时")
+        step(index, f"收到注册验证码: {code}")
+        self._validate_otp(code, index)
+        self._create_account(f"{first_name} {last_name}", _random_birthdate(), index)
+        tokens = self._exchange_registered_tokens(index)
+        return {
+            "email": email,
+            "password": password,
+            "access_token": str(tokens.get("access_token") or "").strip(),
+            "refresh_token": str(tokens.get("refresh_token") or "").strip(),
+            "id_token": str(tokens.get("id_token") or "").strip(),
+            "source_type": "web",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
 
 
 def worker(index: int) -> dict:
@@ -1402,17 +453,12 @@ def worker(index: int) -> dict:
     try:
         step(index, "任务启动")
         result = registrar.register(index)
-        _record_mail_success(result)
         cost = time.time() - start
         access_token = str(result["access_token"])
-        account_service.add_accounts([
-            {
-                "access_token": access_token,
-                "email": str(result.get("email") or "").strip() or None,
-                "password": result.get("password") or None,
-            }
-        ])
-        account_service.refresh_accounts([access_token])
+        account_service.add_account_items([result])
+        refresh_result = account_service.refresh_accounts([access_token])
+        if refresh_result.get("errors"):
+            step(index, f"账号已保存，刷新状态暂未成功，稍后可重试: {refresh_result['errors']}", "yellow")
         with stats_lock:
             stats["done"] += 1
             stats["success"] += 1
@@ -1421,9 +467,6 @@ def worker(index: int) -> dict:
         return {"ok": True, "index": index, "result": result}
     except Exception as e:
         cost = time.time() - start
-        reputation = _record_mail_failure(e)
-        if reputation.get("disabled_changed") and isinstance(e, RegisterAttemptError):
-            log(f"邮箱域名已自动拉黑: {e.mail_domain}，原因: {reputation.get('bucket')}", "yellow")
         with stats_lock:
             stats["done"] += 1
             stats["fail"] += 1

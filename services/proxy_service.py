@@ -11,17 +11,12 @@ from services.config import config
 
 
 class ProxySettingsStore:
-    def build_session_kwargs(self, **session_kwargs) -> dict[str, object]:
-        proxy = config.get_proxy_settings()
+    def build_session_kwargs(self, account: dict | None = None, proxy: str = "", **session_kwargs) -> dict[str, object]:
+        account_proxy = str((account or {}).get("proxy") or "").strip()
+        proxy = str(proxy or account_proxy or config.get_proxy_settings()).strip()
         if proxy:
             session_kwargs["proxy"] = proxy
         return session_kwargs
-
-    def build_session_kwargs_for_url(self, url: str, **session_kwargs) -> dict[str, object]:
-        host = (urlparse(str(url or "")).hostname or "").lower()
-        if host in {"127.0.0.1", "localhost", "::1", "host.docker.internal"}:
-            return session_kwargs
-        return self.build_session_kwargs(**session_kwargs)
 
 
 def _clean(value: object) -> str:
@@ -66,3 +61,4 @@ def test_proxy(url: str, *, timeout: float = 15.0) -> dict:
         session.close()
 
 proxy_settings = ProxySettingsStore()
+

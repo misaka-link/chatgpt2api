@@ -23,13 +23,11 @@ export function RegisterCard() {
   const setTargetAvailable = useSettingsStore((state) => state.setRegisterTargetAvailable);
   const setCheckInterval = useSettingsStore((state) => state.setRegisterCheckInterval);
   const setMailField = useSettingsStore((state) => state.setRegisterMailField);
-  const setHeroSmsField = useSettingsStore((state) => state.setRegisterHeroSmsField);
   const addProvider = useSettingsStore((state) => state.addRegisterProvider);
   const updateProvider = useSettingsStore((state) => state.updateRegisterProvider);
   const deleteProvider = useSettingsStore((state) => state.deleteRegisterProvider);
   const save = useSettingsStore((state) => state.saveRegister);
   const toggle = useSettingsStore((state) => state.toggleRegister);
-  const startCodex = useSettingsStore((state) => state.startCodexRegister);
   const reset = useSettingsStore((state) => state.resetRegister);
 
   if (isLoading) {
@@ -49,13 +47,15 @@ export function RegisterCard() {
     updateProvider(index, {
       type,
       enable: true,
+      ...(type === "cloudmail_gen" ? { api_base: "", admin_email: "", admin_password: "", domain: [], subdomain: [], email_prefix: "" } : {}),
       ...(type === "cloudflare_temp_email" ? { api_base: "", admin_password: "", domain: [] } : {}),
       ...(type === "tempmail_lol" ? { api_key: "", domain: [] } : {}),
       ...(type === "moemail" ? { api_base: "", api_key: "", domain: [] } : {}),
       ...(type === "inbucket" ? { api_base: "", domain: [], random_subdomain: true } : {}),
       ...(type === "duckmail" ? { api_key: "", default_domain: "duckmail.sbs" } : {}),
       ...(type === "gptmail" ? { api_key: "", default_domain: "" } : {}),
-      ...(type === "yyds_mail" ? { api_base: "https://maliapi.215.im/v1", api_key: "", domain: [], subdomain: "", wildcard: false, learning_mode: false, domain_learning: false, domain_explore_rate: 0 } : {}),
+      ...(type === "yyds_mail" ? { api_base: "https://maliapi.215.im/v1", api_key: "", domain: [], subdomain: "", wildcard: false } : {}),
+      ...(type === "ddg_mail" ? { ddg_token: "", cf_inbox_jwt: "", cf_domain: [], admin_password: "" } : {}),
     });
   };
 
@@ -118,36 +118,6 @@ export function RegisterCard() {
           </div>
 
           <div className="space-y-3 border-t border-stone-200 pt-3">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <h3 className="text-sm font-semibold text-stone-800">HeroSMS 接码配置</h3>
-                <p className="mt-1 text-xs text-stone-500">用于 Codex OAuth 遇到手机号验证时自动买号、轮询验证码。系统自动轮询国家，用户只需要控制预算。</p>
-              </div>
-              <label className="flex items-center gap-2 rounded-xl border border-stone-200 bg-white px-3 py-2 text-sm text-stone-700">
-                <Checkbox checked={Boolean(config.hero_sms.enabled)} onCheckedChange={(checked) => setHeroSmsField("enabled", Boolean(checked))} disabled={config.enabled} />
-                启用
-              </label>
-            </div>
-            <div className="grid gap-4 md:grid-cols-4">
-              <div className="space-y-2 md:col-span-2">
-                <label className="text-sm text-stone-700">HeroSMS API Key</label>
-                <Input value={config.hero_sms.api_key} onChange={(event) => setHeroSmsField("api_key", event.target.value)} placeholder="HeroSMS API key" className="h-10 rounded-xl border-stone-200 bg-white font-mono text-xs" disabled={config.enabled} />
-              </div>
-              <div className="space-y-2">
-                <label className="text-sm text-stone-700">单号最低价 USD</label>
-                <Input value={String(config.hero_sms.min_price_usd || "")} onChange={(event) => setHeroSmsField("min_price_usd", event.target.value)} placeholder="0.045" className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
-              </div>
-              <div className="space-y-2">
-                <label className="text-sm text-stone-700">单号最高价 USD</label>
-                <Input value={String(config.hero_sms.max_price_usd || "")} onChange={(event) => setHeroSmsField("max_price_usd", event.target.value)} placeholder="0.1" className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
-              </div>
-              <div className="rounded-xl border border-stone-200 bg-stone-50 px-3 py-2 text-xs leading-5 text-stone-500 md:col-span-4">
-                内置策略：service=<code>dr</code>、operator 自动按价格表选择，先过滤低于最低价和高于最高价的候选，再轮询扩展国家池；黑名单排除英国 <code>16</code>、fraud 高发 <code>10</code>、本轮无短信 <code>4</code>，短信最多等待 30 秒，收不到码立即 cancel 当前 activation，不堵后续线程。
-              </div>
-            </div>
-          </div>
-
-          <div className="space-y-3 border-t border-stone-200 pt-3">
             <div className="flex items-center justify-between gap-3">
               <div>
                 <h3 className="text-sm font-semibold text-stone-800">邮箱配置</h3>
@@ -178,7 +148,7 @@ export function RegisterCard() {
               {providers.map((provider, index) => {
                 const type = String(provider.type || "tempmail_lol");
                 const domains = Array.isArray(provider.domain) ? provider.domain.map(String).join("\n") : "";
-                const learningMode = Boolean(provider.learning_mode ?? provider.domain_learning);
+                const subdomains = Array.isArray(provider.subdomain) ? provider.subdomain.map(String).join("\n") : "";
                 return (
                   <div key={index} className="space-y-3 border-t border-stone-200 pt-3 first:border-t-0 first:pt-0">
                     <div className="flex items-center justify-between gap-3">
@@ -199,6 +169,7 @@ export function RegisterCard() {
                             <SelectValue />
                           </SelectTrigger>
                           <SelectContent>
+                            <SelectItem value="cloudmail_gen">cloudmail_gen</SelectItem>
                             <SelectItem value="cloudflare_temp_email">cloudflare_temp_email</SelectItem>
                             <SelectItem value="tempmail_lol">tempmail_lol</SelectItem>
                             <SelectItem value="moemail">moemail</SelectItem>
@@ -206,21 +177,55 @@ export function RegisterCard() {
                             <SelectItem value="duckmail">duckmail</SelectItem>
                             <SelectItem value="gptmail">gptmail(未测试)</SelectItem>
                             <SelectItem value="yyds_mail">yyds_mail</SelectItem>
+                            <SelectItem value="ddg_mail">ddg_mail (DDG邮箱+CF中转)</SelectItem>
                           </SelectContent>
                         </Select>
                       </div>
-                      {type === "cloudflare_temp_email" || type === "moemail" || type === "inbucket" || type === "yyds_mail" ? (
+                      {type === "cloudmail_gen" || type === "cloudflare_temp_email" || type === "moemail" || type === "inbucket" || type === "yyds_mail" || type === "ddg_mail" ? (
                         <>
                           <div className="space-y-2">
-                            <label className="text-sm text-stone-700">API Base</label>
+                            <label className="text-sm text-stone-700">{type === "cloudmail_gen" ? "CloudMail URL" : "API Base"}</label>
                             <Input value={String(provider.api_base || "")} onChange={(event) => updateProvider(index, { api_base: event.target.value })} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
                           </div>
-                          {type === "cloudflare_temp_email" ? (
+                          {type === "cloudmail_gen" ? (
+                            <>
+                              <div className="space-y-2">
+                                <label className="text-sm text-stone-700">管理员邮箱</label>
+                                <Input value={String(provider.admin_email || "")} onChange={(event) => updateProvider(index, { admin_email: event.target.value })} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
+                              </div>
+                              <div className="space-y-2">
+                                <label className="text-sm text-stone-700">管理员密码</label>
+                                <Input value={String(provider.admin_password || "")} onChange={(event) => updateProvider(index, { admin_password: event.target.value })} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
+                              </div>
+                            </>
+                          ) : null}
+                          {type === "cloudflare_temp_email" || type === "ddg_mail" ? (
                             <div className="space-y-2">
                               <label className="text-sm text-stone-700">Admin Password</label>
                               <Input value={String(provider.admin_password || "")} onChange={(event) => updateProvider(index, { admin_password: event.target.value })} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} />
                             </div>
                           ) : null}
+                        </>
+                      ) : null}
+                      {type === "ddg_mail" ? (
+                        <>
+                        <div className="space-y-2">
+                          <label className="text-sm text-stone-700">DDG Token <span className="text-red-400">*</span></label>
+                          <Input value={String(provider.ddg_token || "")} onChange={(event) => updateProvider(index, { ddg_token: event.target.value })} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} placeholder="DuckDuckGo Email Protection 的 Bearer Token" />
+                        </div>
+                        <div className="space-y-2">
+                          <label className="text-sm text-stone-700">CF Inbox JWT <span className="text-red-400">*</span></label>
+                          <Input value={String(provider.cf_inbox_jwt || "")} onChange={(event) => updateProvider(index, { cf_inbox_jwt: event.target.value })} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} placeholder="CF 临时邮箱后端的固定收件箱 JWT（DDG 转发目标）" />
+                        </div>
+                        <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800">
+                          <p className="font-medium mb-1">使用说明</p>
+                          <ol className="list-decimal list-inside space-y-0.5">
+                            <li>先在 <a href="https://duckduckgo.com/email/" target="_blank" className="underline">DuckDuckGo Email Protection</a> 登录并设置转发目标为 CF 收件箱地址</li>
+                            <li>DDG Token 从浏览器 DevTools → Network → quack.duckduckgo.com 请求中获取 <code className="bg-amber-100 px-1 rounded">Authorization: Bearer</code></li>
+                            <li>CF Inbox JWT 从 CF 临时邮箱后端创建固定收件箱后获取</li>
+                            <li>所有 @duck.com 别名收到的邮件会转发到同一个 CF 收件箱，系统按 To: 头自动匹配</li>
+                          </ol>
+                        </div>
                         </>
                       ) : null}
                       {type === "inbucket" ? (
@@ -251,34 +256,20 @@ export function RegisterCard() {
                             <Checkbox checked={Boolean(provider.wildcard)} onCheckedChange={(checked) => updateProvider(index, { wildcard: Boolean(checked) })} disabled={config.enabled} />
                             Wildcard
                           </label>
-                          <label className="flex items-start gap-3 rounded-xl border border-stone-200 bg-stone-50 px-3 py-2 text-sm text-stone-700 md:col-span-2">
-                            <Checkbox
-                              checked={learningMode}
-                              onCheckedChange={(checked) => {
-                                const enabled = Boolean(checked);
-                                updateProvider(index, {
-                                  learning_mode: enabled,
-                                  domain_learning: enabled,
-                                  domain_explore_rate: enabled ? Number(provider.domain_explore_rate || 0.12) || 0.12 : 0,
-                                });
-                              }}
-                              disabled={config.enabled}
-                            />
-                            <span>
-                              <span className="block font-medium">学习模式</span>
-                              <span className="mt-1 block text-xs leading-5 text-stone-500">
-                                关闭时按 Domain 白名单注册，并跳过已自动拉黑域名；开启后才会使用历史成功域名和随机探索来专门学习域名质量。
-                              </span>
-                            </span>
-                          </label>
                         </>
                       ) : null}
                     </div>
 
-                    {type === "tempmail_lol" || type === "cloudflare_temp_email" || type === "moemail" || type === "inbucket" || type === "yyds_mail" ? (
+                    {type === "cloudmail_gen" || type === "tempmail_lol" || type === "cloudflare_temp_email" || type === "moemail" || type === "inbucket" || type === "yyds_mail" || type === "ddg_mail" ? (
                       <div className="space-y-2">
-                        <label className="text-sm text-stone-700">{type === "inbucket" ? "基础域名列表" : "Domain"}</label>
-                        <Textarea value={domains} onChange={(event) => updateProvider(index, { domain: event.target.value.split(/[\n,]/).map((item) => item.trim()).filter(Boolean) })} placeholder={type === "inbucket" ? "每行一个基础域名，系统会自动生成随机子域名" : type === "moemail" ? "每行一个域名" : type === "yyds_mail" ? "每行一个白名单域名；非学习模式只会从这里选择，硬失败会自动拉黑" : "每行一个域名，留空则使用服务默认域名"} className="min-h-20 rounded-xl border-stone-200 bg-white font-mono text-xs" disabled={config.enabled} />
+                        <label className="text-sm text-stone-700">{type === "cloudmail_gen" ? "邮箱域名" : type === "inbucket" ? "基础域名列表" : "Domain"}</label>
+                        <Textarea value={domains} onChange={(event) => updateProvider(index, { domain: event.target.value.split(/[\n,]/).map((item) => item.trim()) })} placeholder={type === "cloudmail_gen" ? "每行一个域名，留空则使用服务默认域名" : type === "inbucket" ? "每行一个基础域名，系统会自动生成随机子域名" : type === "moemail" ? "每行一个域名" : "每行一个域名，留空则使用服务默认域名"} className="min-h-20 rounded-xl border-stone-200 bg-white font-mono text-xs" disabled={config.enabled} />
+                      </div>
+                    ) : null}
+                    {type === "cloudmail_gen" ? (
+                      <div className="space-y-2">
+                        <label className="text-sm text-stone-700">子域名（支持多个）</label>
+                        <Textarea value={subdomains} onChange={(event) => updateProvider(index, { subdomain: event.target.value.split(/[\n,]/).map((item) => item.trim()) })} placeholder="每行一个子域名前缀，留空则直接使用主域名" className="min-h-20 rounded-xl border-stone-200 bg-white font-mono text-xs" disabled={config.enabled} />
                       </div>
                     ) : null}
                   </div>
@@ -331,13 +322,9 @@ export function RegisterCard() {
                 保存
               </Button>
             </div>
-            <Button className="h-10 w-full rounded-xl bg-emerald-700 px-3 text-white hover:bg-emerald-600" onClick={() => void startCodex()} disabled={isSaving || config.enabled}>
-              {isSaving ? <LoaderCircle className="size-4 animate-spin" /> : <Play className="size-4" />}
-              启动 Codex CPA 注册
-            </Button>
             <div className="flex items-center gap-2 border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
               <AlertTriangle className="size-4 shrink-0" />
-              普通“启动”只跑普通账号；Codex 必须点“启动 Codex CPA 注册”，遇到 add_phone 才会按 HeroSMS 配置买/复用号码。
+              启动之前注意先保存配置。
             </div>
         </div>
 
