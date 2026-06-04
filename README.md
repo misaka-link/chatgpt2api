@@ -22,7 +22,7 @@
 ### Docker 运行
 
 ```bash
-git clone git@github.com:basketikun/chatgpt2api.git
+git clone git@github.com:misaka-link/chatgpt2api.git
 cd chatgpt2api
 docker compose up -d
 ```
@@ -38,7 +38,7 @@ docker compose up -d
 启动后端：
 
 ```bash
-git clone git@github.com:basketikun/chatgpt2api.git
+git clone git@github.com:misaka-link/chatgpt2api.git
 cd chatgpt2api
 uv sync
 uv run main.py
@@ -55,7 +55,7 @@ bun run dev
 后续更新新版本：
 
 ```bash
-docker pull ghcr.io/basketikun/chatgpt2api:latest
+docker pull ghcr.io/misaka-link/chatgpt2api:latest
 docker-compose down
 docker-compose up -d
 
@@ -332,10 +332,10 @@ curl http://localhost:8000/v1/responses \
 
 感谢所有为本项目做出贡献的开发者：
 
-<a href="https://github.com/basketikun/chatgpt2api/graphs/contributors">
-  <img alt="Contributors" src="https://contrib.rocks/image?repo=basketikun/chatgpt2api" />
+<a href="https://github.com/misaka-link/chatgpt2api/graphs/contributors">
+  <img alt="Contributors" src="https://contrib.rocks/image?repo=misaka-link/chatgpt2api" />
 </a>
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/chart?repos=basketikun/chatgpt2api&type=date&legend=top-left)](https://www.star-history.com/?repos=basketikun%2Fchatgpt2api&type=date&legend=top-left)
+[![Star History Chart](https://api.star-history.com/chart?repos=misaka-link/chatgpt2api&type=date&legend=top-left)](https://www.star-history.com/?repos=misaka-link%2Fchatgpt2api&type=date&legend=top-left)
