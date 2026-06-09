@@ -18,6 +18,8 @@
 ## 快速开始
 
 已发布镜像支持 `linux/amd64` 与 `linux/arm64`，在 x86 服务器和 Apple Silicon / ARM Linux 设备上都会自动拉取匹配架构的版本。
+当前官方镜像地址为 `ghcr.io/misaka-link/chatgpt2api:latest`，`main` 分支也可通过 GitHub Actions 的 `Publish Docker Image`
+工作流手动构建并推送最新版镜像。
 
 ### Docker 运行
 
@@ -109,13 +111,20 @@ environment:
 
 - 自动刷新账号邮箱、类型、额度和恢复时间（异步进度追踪）
 - 轮询可用账号执行图片生成与图片编辑
-- 遇到 Token 失效类错误时自动剔除无效 Token
+- 遇到 Token 失效类错误时自动剔除无效 Token；批量手动刷新时会立即移除确认无效的 Token，后台自动检查仍保留短暂确认窗口
 - 定时检查限流账号并自动刷新
 - 支持密码重新登录恢复异常账号，刷新后可自动重登
 - 支持网页端配置全局 HTTP / HTTPS / SOCKS5 / SOCKS5H 代理
 - 支持搜索、筛选、批量刷新、导出、手动编辑和清理账号
 - 支持四种导入方式：本地 CPA JSON 文件导入、远程 CPA 服务器导入、`sub2api` 服务器导入、`access_token` 导入
 - 支持在设置页配置 `sub2api` 服务器，筛选并批量导入其中的 OpenAI OAuth 账号
+
+### OpenAI API Key 管理
+
+- 管理员可通过 `/api/openai-keys` 保存官方 OpenAI API Key 的名称和状态摘要
+- 支持新增、删除和按需检测 Key 可用性；检测会调用官方 `https://api.openai.com/v1/models`
+- 接口返回会隐藏原始 Key 和哈希，仅展示 `key_hint`、状态、HTTP 状态码、模型数量、示例模型和最后检测时间
+- Key 数据保存在 `data/openai_keys.json`
 
 ### 实验性 / 规划中
 
@@ -165,7 +174,58 @@ curl http://localhost:8000/v1/models \
 | 字段   | 说明                                                                                                         |
 |:-----|:-----------------------------------------------------------------------------------------------------------|
 | 返回模型 | `gpt-image-2`、`codex-gpt-image-2`、`auto`、`gpt-5`、`gpt-5-1`、`gpt-5-2`、`gpt-5-3`、`gpt-5-3-mini`、`gpt-5-mini` |
+| 发现逻辑 | 优先使用号池中的文本账号 Token 查询远端模型列表，失败时回退到匿名模型发现；远端不可用时返回本地模型目录，避免客户端模型列表空白                 |
 | 接入场景 | 可接入 Cherry Studio、New API 等上游或客户端                                                                          |
+
+<br>
+</details>
+</details>
+
+<details>
+<summary><code>/api/openai-keys</code></summary>
+<br>
+
+管理员接口，用于管理和检测官方 OpenAI API Key。所有请求都需要管理员 `Authorization: Bearer <auth-key>`。
+
+```bash
+curl http://localhost:8000/api/openai-keys \
+  -H "Authorization: Bearer <auth-key>"
+```
+
+新增并检测 Key：
+
+```bash
+curl http://localhost:8000/api/openai-keys \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <auth-key>" \
+  -d '{
+    "name": "project key",
+    "key": "sk-...",
+    "check": true
+  }'
+```
+
+检测或删除：
+
+```bash
+curl -X POST http://localhost:8000/api/openai-keys/<key_id>/check \
+  -H "Authorization: Bearer <auth-key>"
+
+curl -X DELETE http://localhost:8000/api/openai-keys/<key_id> \
+  -H "Authorization: Bearer <auth-key>"
+```
+
+<details>
+<summary>说明</summary>
+<br>
+
+| 字段              | 说明                                            |
+|:----------------|:----------------------------------------------|
+| `name`          | 自定义名称                                          |
+| `key_hint`      | 脱敏后的 Key 片段，接口不会返回原始 Key 或 hash              |
+| `status`        | `unchecked`、`ok`、`invalid`、`rate_limited`、`forbidden`、`error` |
+| `models_count`  | 检测到的官方模型数量                                     |
+| `sample_models` | 示例模型 ID                                       |
 
 <br>
 </details>
