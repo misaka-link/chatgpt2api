@@ -300,6 +300,31 @@ export type RegisterConfig = {
   }>;
 };
 
+export type OpenAIKeyStatus = "unchecked" | "ok" | "invalid" | "rate_limited" | "forbidden" | "error" | string;
+
+export type OpenAIKeyItem = {
+  id: string;
+  name: string;
+  key_hint: string;
+  status: OpenAIKeyStatus;
+  http_status?: number | null;
+  models_count: number;
+  sample_models: string[];
+  last_error?: string | null;
+  last_checked_at?: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type OpenAIKeyListResponse = {
+  items: OpenAIKeyItem[];
+};
+
+type OpenAIKeyMutationResponse = {
+  item?: OpenAIKeyItem;
+  items: OpenAIKeyItem[];
+};
+
 export async function login(authKey: string) {
   const normalizedAuthKey = String(authKey || "").trim();
   return httpRequest<LoginResponse>("/auth/login", {
@@ -695,6 +720,32 @@ export async function stopRegister() {
 
 export async function resetRegister() {
   return httpRequest<{ register: RegisterConfig }>("/api/register/reset", { method: "POST" });
+}
+
+// ── Official OpenAI API Keys ──────────────────────────────────────
+
+export async function fetchOpenAIKeys() {
+  return httpRequest<OpenAIKeyListResponse>("/api/openai-keys");
+}
+
+export async function createOpenAIKey(name: string, key: string, check = true) {
+  return httpRequest<Required<Pick<OpenAIKeyMutationResponse, "item">> & OpenAIKeyMutationResponse>("/api/openai-keys", {
+    method: "POST",
+    body: { name, key, check },
+  });
+}
+
+export async function checkOpenAIKey(keyId: string) {
+  return httpRequest<Required<Pick<OpenAIKeyMutationResponse, "item">> & OpenAIKeyMutationResponse>(
+    `/api/openai-keys/${keyId}/check`,
+    { method: "POST" },
+  );
+}
+
+export async function deleteOpenAIKey(keyId: string) {
+  return httpRequest<OpenAIKeyListResponse>(`/api/openai-keys/${keyId}`, {
+    method: "DELETE",
+  });
 }
 
 // ── CPA (CLIProxyAPI) ──────────────────────────────────────────────

@@ -18,6 +18,12 @@ class ProxySettingsStore:
             session_kwargs["proxy"] = proxy
         return session_kwargs
 
+    def build_session_kwargs_for_url(self, url: str, **session_kwargs) -> dict[str, object]:
+        host = (urlparse(str(url or "")).hostname or "").lower()
+        if host in {"127.0.0.1", "localhost", "::1", "host.docker.internal"}:
+            return session_kwargs
+        return self.build_session_kwargs(**session_kwargs)
+
 
 def _clean(value: object) -> str:
     return str(value or "").strip()
@@ -61,4 +67,3 @@ def test_proxy(url: str, *, timeout: float = 15.0) -> dict:
         session.close()
 
 proxy_settings = ProxySettingsStore()
-
