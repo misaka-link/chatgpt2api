@@ -17,10 +17,6 @@
 
 ## 快速开始
 
-已发布镜像支持 `linux/amd64` 与 `linux/arm64`，在 x86 服务器和 Apple Silicon / ARM Linux 设备上都会自动拉取匹配架构的版本。
-当前官方镜像地址为 `ghcr.io/misaka-link/chatgpt2api:latest`，`main` 分支也可通过 GitHub Actions 的 `Publish Docker Image`
-工作流手动构建并推送最新版镜像。
-
 ### Docker 运行
 
 ```bash
@@ -34,6 +30,27 @@ docker compose up -d
 - Web 面板：`http://localhost:3000`
 - API 地址：`http://localhost:3000/v1`
 - 数据目录：`./data`
+
+### WARP / FlareSolverr 稳定代理部署
+
+如果注册或图片链路经常遇到 Cloudflare 拦截，可以启用附带的 WARP + Privoxy + FlareSolverr 方案：
+
+```bash
+cp .env.example .env
+docker compose -f docker-compose.warp.yml up -d --build
+```
+
+该 compose 会启动：
+
+- `warp-proxy`：提供 WARP SOCKS5 出口。
+- `privoxy`：把 WARP SOCKS5 转成 HTTP 代理。
+- `flaresolverr`：刷新 Cloudflare clearance。
+- `init-config`：幂等写入 `proxy_runtime` 默认配置。
+- `app`：启动 ChatGPT2API 主服务。
+
+默认只让上游 OpenAI / ChatGPT 请求走稳定代理，账号邮箱、CPA 等辅助链路不会被强制接管。账号自身配置的代理优先级最高，其次是稳定代理运行时，再其次是显式代理和旧版全局代理。
+
+可在 `.env` 中调整端口和代理运行时参数，也可在后台设置页的「稳定代理运行时」面板手动保存、测试代理和测试 clearance。
 
 ### 本地开发
 
@@ -111,25 +128,17 @@ environment:
 
 - 自动刷新账号邮箱、类型、额度和恢复时间（异步进度追踪）
 - 轮询可用账号执行图片生成与图片编辑
-- 遇到 Token 失效类错误时自动剔除无效 Token；批量手动刷新时会立即移除确认无效的 Token，后台自动检查仍保留短暂确认窗口
+- 遇到 Token 失效类错误时自动剔除无效 Token
 - 定时检查限流账号并自动刷新
 - 支持密码重新登录恢复异常账号，刷新后可自动重登
 - 支持网页端配置全局 HTTP / HTTPS / SOCKS5 / SOCKS5H 代理
+- 支持 WARP / FlareSolverr 稳定代理运行时
 - 支持搜索、筛选、批量刷新、导出、手动编辑和清理账号
 - 支持四种导入方式：本地 CPA JSON 文件导入、远程 CPA 服务器导入、`sub2api` 服务器导入、`access_token` 导入
 - 支持在设置页配置 `sub2api` 服务器，筛选并批量导入其中的 OpenAI OAuth 账号
 
-### OpenAI API Key 管理
-
-- 管理员可通过 `/api/openai-keys` 保存官方 OpenAI API Key 的名称和状态摘要
-- 支持新增、删除和按需检测 Key 可用性；检测会调用官方 `https://api.openai.com/v1/models`
-- 接口返回会隐藏原始 Key 和哈希，仅展示 `key_hint`、状态、HTTP 状态码、模型数量、示例模型和最后检测时间
-- Key 数据保存在 `data/openai_keys.json`
-
 ### 实验性 / 规划中
 
-- `/v1/complete` 文本补全与流式输出已实现，但仍在测试，目前会出现对话重复的问题，请谨慎测试使用
-- `/v1/chat/completions` 文本链路支持短 TTL 缓存、重复请求合并与相邻重复消息清理，可通过 `chat_completion_cache` 配置调整
 - 详细状态说明见：[功能清单](./docs/feature-status.en.md)
 
 ## 效果展示
@@ -174,58 +183,7 @@ curl http://localhost:8000/v1/models \
 | 字段   | 说明                                                                                                         |
 |:-----|:-----------------------------------------------------------------------------------------------------------|
 | 返回模型 | `gpt-image-2`、`codex-gpt-image-2`、`auto`、`gpt-5`、`gpt-5-1`、`gpt-5-2`、`gpt-5-3`、`gpt-5-3-mini`、`gpt-5-mini` |
-| 发现逻辑 | 优先使用号池中的文本账号 Token 查询远端模型列表，失败时回退到匿名模型发现；远端不可用时返回本地模型目录，避免客户端模型列表空白                 |
 | 接入场景 | 可接入 Cherry Studio、New API 等上游或客户端                                                                          |
-
-<br>
-</details>
-</details>
-
-<details>
-<summary><code>/api/openai-keys</code></summary>
-<br>
-
-管理员接口，用于管理和检测官方 OpenAI API Key。所有请求都需要管理员 `Authorization: Bearer <auth-key>`。
-
-```bash
-curl http://localhost:8000/api/openai-keys \
-  -H "Authorization: Bearer <auth-key>"
-```
-
-新增并检测 Key：
-
-```bash
-curl http://localhost:8000/api/openai-keys \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer <auth-key>" \
-  -d '{
-    "name": "project key",
-    "key": "sk-...",
-    "check": true
-  }'
-```
-
-检测或删除：
-
-```bash
-curl -X POST http://localhost:8000/api/openai-keys/<key_id>/check \
-  -H "Authorization: Bearer <auth-key>"
-
-curl -X DELETE http://localhost:8000/api/openai-keys/<key_id> \
-  -H "Authorization: Bearer <auth-key>"
-```
-
-<details>
-<summary>说明</summary>
-<br>
-
-| 字段              | 说明                                            |
-|:----------------|:----------------------------------------------|
-| `name`          | 自定义名称                                          |
-| `key_hint`      | 脱敏后的 Key 片段，接口不会返回原始 Key 或 hash              |
-| `status`        | `unchecked`、`ok`、`invalid`、`rate_limited`、`forbidden`、`error` |
-| `models_count`  | 检测到的官方模型数量                                     |
-| `sample_models` | 示例模型 ID                                       |
 
 <br>
 </details>
@@ -315,7 +273,7 @@ curl http://localhost:8000/v1/images/edits \
 <summary><code>POST /v1/chat/completions</code></summary>
 <br>
 
-面向图片场景的 Chat Completions 兼容接口，不是完整通用聊天代理。
+面向文本、网页搜索与图片场景的 Chat Completions 兼容接口，不是完整通用聊天代理。
 
 ```bash
 curl http://localhost:8000/v1/chat/completions \
@@ -337,12 +295,14 @@ curl http://localhost:8000/v1/chat/completions \
 <summary>字段说明</summary>
 <br>
 
-| 字段         | 说明                |
-|:-----------|:------------------|
-| `model`    | 图片模型，默认按图片生成场景处理  |
-| `messages` | 消息数组，需要是图片相关请求内容  |
-| `n`        | 生成数量，按当前实现解析为图片数量 |
-| `stream`   | 已实现，但仍在测试         |
+| 字段                   | 说明                                                                           |
+|:---------------------|:-----------------------------------------------------------------------------|
+| `model`              | 文本、搜索或图片模型；搜索模型会触发网页搜索兼容逻辑                                                   |
+| `messages`           | 消息数组，支持文本、搜索和图片请求内容                                                          |
+| `n`                  | 图片生成数量，按当前实现解析为图片数量                                                          |
+| `stream`             | 文本、搜索和图片场景均支持，仍在测试                                                           |
+| `tools`              | 文本场景支持 `web_search` / `web_search_preview` / `web_search_preview_2025_03_11` |
+| `web_search_options` | 传入时会触发网页搜索兼容逻辑                                                               |
 
 <br>
 </details>
@@ -352,7 +312,7 @@ curl http://localhost:8000/v1/chat/completions \
 <summary><code>POST /v1/responses</code></summary>
 <br>
 
-面向图片生成工具调用的 Responses API 兼容接口，不是完整通用 Responses API 代理。
+面向文本、网页搜索和图片生成工具调用的 Responses API 兼容接口，不是完整通用 Responses API 代理。
 
 ```bash
 curl http://localhost:8000/v1/responses \
@@ -373,12 +333,12 @@ curl http://localhost:8000/v1/responses \
 <summary>字段说明</summary>
 <br>
 
-| 字段       | 说明                            |
-|:---------|:------------------------------|
-| `model`  | 响应中会回显该模型字段，但图片生成当前仍走图片生成兼容逻辑 |
-| `input`  | 输入内容，需要能解析出图片生成提示词            |
-| `tools`  | 必须包含 `image_generation` 工具请求  |
-| `stream` | 已实现，但仍在测试                     |
+| 字段       | 说明                                                                                      |
+|:---------|:----------------------------------------------------------------------------------------|
+| `model`  | 响应中会回显该模型字段，搜索和图片生成会走对应兼容逻辑                                                             |
+| `input`  | 输入内容；搜索使用最后一条用户文本，图片生成需能解析出提示词                                                          |
+| `tools`  | 支持 `image_generation`、`web_search`、`web_search_preview`、`web_search_preview_2025_03_11` |
+| `stream` | 已实现，但仍在测试                                                                               |
 
 <br>
 </details>

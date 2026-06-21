@@ -17,7 +17,8 @@ from urllib.parse import parse_qs, urlencode, urlparse
 from curl_cffi import requests
 
 from services.account_service import account_service
-from services.register import domain_reputation, mail_provider
+from services.proxy_service import ClearanceBundle, proxy_settings
+from services.register import mail_provider
 
 base_dir = Path(__file__).resolve().parent
 config = {
@@ -193,60 +194,53 @@ def _response_debug_detail(resp, limit: int = 800) -> str:
 def _is_cloudflare_challenge(resp) -> bool:
     if resp is None:
         return False
+    try:
+        status_code = int(getattr(resp, "status_code", 0) or 0)
+    except (TypeError, ValueError):
+        status_code = 0
+    if status_code not in (403, 503):
+        return False
     text = str(getattr(resp, "text", "") or "").lower()
-    headers = getattr(resp, "headers", {}) or {}
-    server = str(headers.get("server") or "").lower()
     return (
-        "cloudflare" in server
-        or "challenges.cloudflare.com" in text
-        or "<title>just a moment" in text
+        "<title>just a moment" in text
+        or "<title>attention required! | cloudflare" in text
+        or "cf-chl-" in text
+        or "__cf_chl_" in text
+        or "cf-browser-verification" in text
     )
 
 
+def _mail_config() -> dict:
+    return {**config["mail"], "proxy": config["proxy"]}
+
+
+def _authorize_landed_page(resp) -> str:
+    """诊断用：粗判 authorize 之后落在哪个页面。返回 signup / login / "" 仅供日志。
+
+    注意：email-verification / email_otp_verification 在注册和登录流程里都会出现，
+    无法据此可靠区分，所以这里只用于打日志，绝不据此中断注册流程。
+    """
+    if resp is None:
+        return ""
+    final_url = str(getattr(resp, "url", "") or "").lower()
+    data = _response_json(resp)
+    page_type = ""
+    page = data.get("page") if isinstance(data, dict) else None
+    if isinstance(page, dict):
+        page_type = str(page.get("type") or "").lower()
+    if "create-account" in final_url or "signup" in final_url or "create_account" in page_type:
+        return "signup"
+    if "/log-in" in final_url or "/login" in final_url or page_type in {"login", "password_verification"}:
+        return "login"
+    return ""
+
+
 def create_mailbox(username: str | None = None) -> dict:
-    return mail_provider.create_mailbox(config["mail"], username)
+    return mail_provider.create_mailbox(_mail_config(), username)
 
 
 def wait_for_code(mailbox: dict) -> str | None:
-    return mail_provider.wait_for_code(config["mail"], mailbox)
-
-
-class RegisterAttemptError(RuntimeError):
-    def __init__(self, reason: str, mailbox: dict | None = None):
-        super().__init__(reason)
-        self.reason = str(reason)
-        self.mailbox = dict(mailbox or {})
-
-    @property
-    def mail_provider(self) -> str:
-        return str(self.mailbox.get("provider") or "").strip()
-
-    @property
-    def mail_domain(self) -> str:
-        domain = str(self.mailbox.get("domain") or "").strip().lower()
-        if domain:
-            return domain
-        address = str(self.mailbox.get("address") or "").strip().lower()
-        return address.rsplit("@", 1)[-1] if "@" in address else ""
-
-
-def _record_mail_success(result: dict) -> None:
-    provider = str(result.get("mail_provider") or "").strip()
-    domain = str(result.get("mail_domain") or "").strip()
-    if provider and domain:
-        domain_reputation.store.record_success(provider, domain)
-
-
-def _record_mail_failure(error: Exception) -> dict:
-    if isinstance(error, mail_provider.LocalDomainFilteredError):
-        return {}
-    if not isinstance(error, RegisterAttemptError):
-        return {}
-    provider = error.mail_provider
-    domain = error.mail_domain
-    if not provider or not domain:
-        return {}
-    return domain_reputation.store.record_failure(provider, domain, error.reason)
+    return mail_provider.wait_for_code(_mail_config(), mailbox)
 
 
 from utils.sentinel import SentinelTokenGenerator, build_sentinel_token as _build_sentinel_token_tuple  # noqa: F401
@@ -259,10 +253,53 @@ def build_sentinel_token(session: requests.Session, device_id: str, flow: str) -
 
 
 def create_session(proxy: str = "") -> Any:
-    kwargs = {"impersonate": "chrome", "verify": False}
-    if proxy:
-        kwargs["proxy"] = proxy
+    kwargs = proxy_settings.build_session_kwargs(
+        proxy=proxy,
+        upstream=True,
+        impersonate="chrome",
+        verify=False,
+    )
     return requests.Session(**kwargs)
+
+
+def _apply_clearance_to_session(session: requests.Session, bundle: ClearanceBundle | None) -> None:
+    if bundle is None:
+        return
+    if bundle.user_agent:
+        session.headers["User-Agent"] = bundle.user_agent
+        session.headers["user-agent"] = bundle.user_agent
+    for name, value in bundle.cookies.items():
+        try:
+            session.cookies.set(name, value, domain=f".{bundle.target_host or 'openai.com'}")
+            session.cookies.set(name, value, domain=bundle.target_host or "auth.openai.com")
+        except Exception:
+            continue
+
+
+def _headers_with_clearance(
+    headers: dict[str, str],
+    target_url: str,
+    proxy: str = "",
+    user_agent_override: str = "",
+) -> dict[str, str]:
+    merged = proxy_settings.build_headers(
+        headers=headers,
+        target_url=target_url,
+        proxy=proxy,
+        upstream=True,
+    )
+    normalized = {str(key): str(value) for key, value in merged.items()}
+    if user_agent_override:
+        ua_key = next((key for key in normalized if key.lower() == "user-agent"), "user-agent")
+        normalized[ua_key] = user_agent_override
+    return normalized
+
+
+def _cloudflare_block_message(resp, prefix: str = "被 Cloudflare 拦截", reason: str = "") -> str:
+    status = getattr(resp, "status_code", "unknown")
+    debug = _response_debug_detail(resp)
+    reason = reason or "clearance 刷新失败或重试后仍失败，请更换 IP/代理重试"
+    return f"{prefix}，{reason}: status={status}, {debug}"
 
 
 def request_with_local_retry(session: requests.Session, method: str, url: str, retry_attempts: int = 3, **kwargs):
@@ -342,7 +379,10 @@ def request_platform_oauth_token(session: requests.Session, code: str, code_veri
 
 class PlatformRegistrar:
     def __init__(self, proxy: str = "") -> None:
-        self.session = create_session(proxy)
+        self.proxy = str(proxy or "").strip()
+        self.session = create_session(self.proxy)
+        self.clearance_user_agent = ""
+        self.clearance_failure_reason = ""
         self.device_id = str(uuid.uuid4())
         self.code_verifier = ""
         self.platform_auth_code = ""
@@ -363,6 +403,33 @@ class PlatformRegistrar:
         headers.update(_make_trace_headers())
         return headers
 
+    def _refresh_cloudflare_clearance(self, target_url: str, index: int) -> ClearanceBundle | None:
+        self.clearance_failure_reason = ""
+        get_profile = getattr(proxy_settings, "get_profile", None)
+        if callable(get_profile):
+            profile = get_profile(proxy=self.proxy, upstream=True)
+            if not profile.clearance_enabled:
+                self.clearance_failure_reason = (
+                    "可尝试使用 FlareSolverr 清障方式，注意需要 Docker 部署 flaresolverr、privoxy、warp-proxy 等相关容器"
+                )
+                step(index, f"检测到 Cloudflare 拦截，{self.clearance_failure_reason}", "yellow")
+                return None
+        step(index, "检测到 Cloudflare 拦截，尝试刷新 clearance", "yellow")
+        bundle = proxy_settings.refresh_clearance(
+            target_url=target_url,
+            proxy=self.proxy,
+            force=True,
+            upstream=True,
+        )
+        if bundle is not None:
+            _apply_clearance_to_session(self.session, bundle)
+            self.clearance_user_agent = bundle.user_agent or self.clearance_user_agent
+            step(index, "Cloudflare clearance 刷新完成，重试当前请求", "yellow")
+        else:
+            self.clearance_failure_reason = "clearance 刷新未返回可用 Cookie，请检查 FlareSolverr URL、代理和出口 IP"
+            step(index, f"Cloudflare clearance 刷新失败：{self.clearance_failure_reason}", "yellow")
+        return bundle
+
     def _platform_authorize(self, email: str, index: int) -> None:
         step(index, "开始 platform authorize")
         self.session.cookies.set("oai-did", self.device_id, domain=".auth.openai.com")
@@ -374,7 +441,10 @@ class PlatformRegistrar:
             "audience": platform_oauth_audience,
             "redirect_uri": platform_oauth_redirect_uri,
             "device_id": self.device_id,
-            "screen_hint": "login_or_signup",
+            # 注册流程显式声明 signup：throwaway 域名 OpenAI 会自动当新账号走注册，
+            # 但 @outlook.com/@hotmail.com 这类真实消费邮箱会被 login_or_signup 路由到登录分支，
+            # 后续 user/register 落在错误的 auth step 上报 invalid_auth_step。
+            "screen_hint": "signup",
             "max_age": "0",
             "login_hint": email,
             "scope": "openid profile email offline_access",
@@ -386,22 +456,46 @@ class PlatformRegistrar:
             "code_challenge_method": "S256",
             "auth0Client": platform_auth0_client,
         }
-        resp, error = request_with_local_retry(self.session, "get", f"{auth_base}/api/accounts/authorize?{urlencode(params)}", headers=self._navigate_headers(f"{platform_base}/"), allow_redirects=True, verify=False)
+        target_url = f"{auth_base}/api/accounts/authorize?{urlencode(params)}"
+        headers = self._navigate_headers(f"{platform_base}/")
+        headers = _headers_with_clearance(headers, target_url, self.proxy, self.clearance_user_agent)
+        resp, error = request_with_local_retry(self.session, "get", target_url, headers=headers, allow_redirects=True, verify=False)
+        if _is_cloudflare_challenge(resp):
+            bundle = self._refresh_cloudflare_clearance(auth_base, index)
+            if bundle is None:
+                raise RuntimeError(_cloudflare_block_message(resp, reason=self.clearance_failure_reason))
+            retry_headers = _headers_with_clearance(self._navigate_headers(f"{platform_base}/"), target_url, self.proxy, self.clearance_user_agent)
+            resp, error = request_with_local_retry(self.session, "get", target_url, headers=retry_headers, allow_redirects=True, verify=False)
+            if _is_cloudflare_challenge(resp):
+                raise RuntimeError(_cloudflare_block_message(resp, "Cloudflare clearance 重试仍被拦截"))
         if resp is None or resp.status_code != 200:
             err = _response_json(resp).get("error", {}) if resp is not None else {}
             detail = f": {err.get('code', '')} - {err.get('message', '')}".strip(" -") if err else ""
-            if _is_cloudflare_challenge(resp):
-                raise RuntimeError("被 Cloudflare 拦截，请更换 IP 重试")
             debug = _response_debug_detail(resp)
             status = getattr(resp, "status_code", "unknown")
             raise RuntimeError(error or f"platform_authorize_http_{status}{detail}, {debug}")
-        step(index, "platform authorize 完成")
+        landed = _authorize_landed_page(resp)
+        # 仅打日志，不据此中断：authorize 落地页无法可靠区分注册/登录，
+        # 真正的判定交给 user/register（失败会 dump 完整响应）。
+        step(index, f"platform authorize 完成[{landed or '?'}] url={str(getattr(resp, 'url', '') or '')[:160]}")
 
     def _register_user(self, email: str, password: str, index: int) -> None:
         step(index, "开始提交注册密码")
+        url = f"{auth_base}/api/accounts/user/register"
         headers = self._json_headers(f"{auth_base}/create-account/password")
         headers["openai-sentinel-token"] = build_sentinel_token(self.session, self.device_id, "username_password_create")
-        resp, error = request_with_local_retry(self.session, "post", f"{auth_base}/api/accounts/user/register", json={"username": email, "password": password}, headers=headers, verify=False)
+        headers = _headers_with_clearance(headers, url, self.proxy, self.clearance_user_agent)
+        resp, error = request_with_local_retry(self.session, "post", url, json={"username": email, "password": password}, headers=headers, verify=False)
+        if _is_cloudflare_challenge(resp):
+            bundle = self._refresh_cloudflare_clearance(auth_base, index)
+            if bundle is None:
+                raise RuntimeError(_cloudflare_block_message(resp, reason=self.clearance_failure_reason))
+            headers = self._json_headers(f"{auth_base}/create-account/password")
+            headers["openai-sentinel-token"] = build_sentinel_token(self.session, self.device_id, "username_password_create")
+            headers = _headers_with_clearance(headers, url, self.proxy, self.clearance_user_agent)
+            resp, error = request_with_local_retry(self.session, "post", url, json={"username": email, "password": password}, headers=headers, verify=False)
+            if _is_cloudflare_challenge(resp):
+                raise RuntimeError(_cloudflare_block_message(resp, "Cloudflare clearance 重试仍被拦截"))
         if resp is None or resp.status_code != 200:
             data = _response_json(resp) if resp is not None else {}
             if data.get("message") == "Failed to create account. Please try again.":
@@ -412,7 +506,17 @@ class PlatformRegistrar:
 
     def _send_otp(self, index: int) -> None:
         step(index, "开始发送验证码")
-        resp, error = request_with_local_retry(self.session, "get", f"{auth_base}/api/accounts/email-otp/send", headers=self._navigate_headers(f"{auth_base}/create-account/password"), allow_redirects=True, verify=False)
+        url = f"{auth_base}/api/accounts/email-otp/send"
+        headers = _headers_with_clearance(self._navigate_headers(f"{auth_base}/create-account/password"), url, self.proxy, self.clearance_user_agent)
+        resp, error = request_with_local_retry(self.session, "get", url, headers=headers, allow_redirects=True, verify=False)
+        if _is_cloudflare_challenge(resp):
+            bundle = self._refresh_cloudflare_clearance(auth_base, index)
+            if bundle is None:
+                raise RuntimeError(_cloudflare_block_message(resp, reason=self.clearance_failure_reason))
+            headers = _headers_with_clearance(self._navigate_headers(f"{auth_base}/create-account/password"), url, self.proxy, self.clearance_user_agent)
+            resp, error = request_with_local_retry(self.session, "get", url, headers=headers, allow_redirects=True, verify=False)
+            if _is_cloudflare_challenge(resp):
+                raise RuntimeError(_cloudflare_block_message(resp, "Cloudflare clearance 重试仍被拦截"))
         if resp is None or resp.status_code not in (200, 302):
             raise RuntimeError(error or f"send_otp_http_{getattr(resp, 'status_code', 'unknown')}")
         step(index, "发送验证码完成")
@@ -431,9 +535,21 @@ class PlatformRegistrar:
 
     def _create_account(self, name: str, birthdate: str, index: int) -> None:
         step(index, "开始创建账号资料")
+        url = f"{auth_base}/api/accounts/create_account"
         headers = self._json_headers(f"{auth_base}/about-you")
         headers["openai-sentinel-token"] = build_sentinel_token(self.session, self.device_id, "oauth_create_account")
-        resp, error = request_with_local_retry(self.session, "post", f"{auth_base}/api/accounts/create_account", json={"name": name, "birthdate": birthdate}, headers=headers, verify=False)
+        headers = _headers_with_clearance(headers, url, self.proxy, self.clearance_user_agent)
+        resp, error = request_with_local_retry(self.session, "post", url, json={"name": name, "birthdate": birthdate}, headers=headers, verify=False)
+        if _is_cloudflare_challenge(resp):
+            bundle = self._refresh_cloudflare_clearance(auth_base, index)
+            if bundle is None:
+                raise RuntimeError(_cloudflare_block_message(resp, reason=self.clearance_failure_reason))
+            headers = self._json_headers(f"{auth_base}/about-you")
+            headers["openai-sentinel-token"] = build_sentinel_token(self.session, self.device_id, "oauth_create_account")
+            headers = _headers_with_clearance(headers, url, self.proxy, self.clearance_user_agent)
+            resp, error = request_with_local_retry(self.session, "post", url, json={"name": name, "birthdate": birthdate}, headers=headers, verify=False)
+            if _is_cloudflare_challenge(resp):
+                raise RuntimeError(_cloudflare_block_message(resp, "Cloudflare clearance 重试仍被拦截"))
         if resp is None or resp.status_code not in (200, 302):
             data = _response_json(resp) if resp is not None else {}
             if data.get("message") == "Failed to create account. Please try again.":
@@ -454,15 +570,15 @@ class PlatformRegistrar:
         return tokens
 
     def register(self, index: int) -> dict:
-        mailbox: dict = {}
+        step(index, "开始创建邮箱")
+        mailbox = create_mailbox()
+        email = str(mailbox.get("address") or "").strip()
+        if not email:
+            mail_provider.release_mailbox(mailbox)
+            raise RuntimeError("邮箱服务未返回 address")
+        label = str(mailbox.get("label") or "")
+        step(index, f"邮箱创建完成[{label}]: {email}")
         try:
-            step(index, "开始创建邮箱")
-            mailbox = create_mailbox()
-            email = str(mailbox.get("address") or "").strip()
-            if not email:
-                raise RuntimeError("邮箱服务未返回 address")
-            label = str(mailbox.get("label") or "")
-            step(index, f"邮箱创建完成[{label}]: {email}")
             password = _random_password()
             first_name, last_name = _random_name()
             self._platform_authorize(email, index)
@@ -476,27 +592,19 @@ class PlatformRegistrar:
             self._validate_otp(code, index)
             self._create_account(f"{first_name} {last_name}", _random_birthdate(), index)
             tokens = self._exchange_registered_tokens(index)
-            mail_domain = str(mailbox.get("domain") or (email.rsplit("@", 1)[-1] if "@" in email else "")).strip().lower()
-            return {
-                "email": email,
-                "password": password,
-                "access_token": str(tokens.get("access_token") or "").strip(),
-                "refresh_token": str(tokens.get("refresh_token") or "").strip(),
-                "id_token": str(tokens.get("id_token") or "").strip(),
-                "mail_provider": str(mailbox.get("provider") or "").strip(),
-                "mail_provider_ref": str(mailbox.get("provider_ref") or "").strip(),
-                "mail_domain": mail_domain,
-                "source_type": "web",
-                "created_at": datetime.now(timezone.utc).isoformat(),
-            }
-        except RegisterAttemptError:
+        except Exception as error:
+            mail_provider.mark_mailbox_result(mailbox, success=False, error=error)
             raise
-        except Exception as exc:
-            if isinstance(exc, mail_provider.LocalDomainFilteredError):
-                raise
-            if mailbox:
-                raise RegisterAttemptError(str(exc), mailbox) from exc
-            raise
+        mail_provider.mark_mailbox_result(mailbox, success=True)
+        return {
+            "email": email,
+            "password": password,
+            "access_token": str(tokens.get("access_token") or "").strip(),
+            "refresh_token": str(tokens.get("refresh_token") or "").strip(),
+            "id_token": str(tokens.get("id_token") or "").strip(),
+            "source_type": "web",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
 
 
 def worker(index: int) -> dict:
@@ -505,7 +613,6 @@ def worker(index: int) -> dict:
     try:
         step(index, "任务启动")
         result = registrar.register(index)
-        _record_mail_success(result)
         cost = time.time() - start
         access_token = str(result["access_token"])
         account_service.add_account_items([result])
@@ -518,14 +625,8 @@ def worker(index: int) -> dict:
             avg = (time.time() - stats["start_time"]) / stats["success"]
         log(f'{result["email"]} 注册成功，本次耗时{cost:.1f}s，全局平均每个号注册耗时{avg:.1f}s', "green")
         return {"ok": True, "index": index, "result": result}
-    except mail_provider.LocalDomainFilteredError as e:
-        log(f"任务{index} 已跳过，本地邮箱域名信誉过滤: {e}", "yellow")
-        return {"ok": False, "skipped": True, "index": index, "reason": str(e)}
     except Exception as e:
         cost = time.time() - start
-        reputation = _record_mail_failure(e)
-        if reputation.get("disabled_changed") and isinstance(e, RegisterAttemptError):
-            log(f"邮箱域名已自动拉黑: {e.mail_domain}，原因: {reputation.get('bucket')}", "yellow")
         with stats_lock:
             stats["done"] += 1
             stats["fail"] += 1

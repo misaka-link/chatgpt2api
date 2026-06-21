@@ -9,7 +9,7 @@ import random
 import subprocess
 import tarfile
 import threading
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import quote, urlencode
 
@@ -21,7 +21,7 @@ from services.image_tags_service import TAGS_FILE
 
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _iso_now() -> str:
@@ -343,7 +343,7 @@ class BackupService:
         if last_finished_raw:
             try:
                 last_finished = datetime.fromisoformat(last_finished_raw.replace("Z", "+00:00"))
-                elapsed = (_utc_now() - last_finished.astimezone(timezone.utc)).total_seconds()
+                elapsed = (_utc_now() - last_finished.astimezone(UTC)).total_seconds()
                 if elapsed < interval_minutes * 60:
                     return
             except Exception:

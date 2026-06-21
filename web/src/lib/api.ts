@@ -34,6 +34,8 @@ export type Account = {
   restore_at?: string | null;
   success: number;
   fail: number;
+  /** 当前图片在途数(正在生成、尚未结束的图片数)。号池空闲时持续 > 0 表示并发槽位泄漏。 */
+  image_inflight?: number;
   last_used_at?: string | null;
   proxy?: string | null;
 };
@@ -99,6 +101,57 @@ type AccountUpdateResponse = {
   items: Account[];
 };
 
+export type ProxyRuntimeEgressMode = "direct" | "single_proxy";
+export type ProxyRuntimeClearanceMode = "none" | "manual" | "flaresolverr";
+
+export type ProxyRuntimeClearanceSettings = {
+  enabled: boolean;
+  mode: ProxyRuntimeClearanceMode;
+  cf_cookies: string;
+  cf_clearance: string;
+  user_agent: string;
+  browser: string;
+  flaresolverr_url: string;
+  timeout_sec: number | string;
+  refresh_interval: number | string;
+  warm_up_on_start: boolean;
+  has_cf_cookies?: boolean;
+  has_cf_clearance?: boolean;
+};
+
+export type ProxyRuntimeSettings = {
+  enabled: boolean;
+  egress_mode: ProxyRuntimeEgressMode;
+  proxy_url: string;
+  resource_proxy_url: string;
+  skip_ssl_verify: boolean;
+  reset_session_status_codes: number[];
+  clearance: ProxyRuntimeClearanceSettings;
+};
+
+export type ProxyRuntimeStatus = {
+  enabled: boolean;
+  egress_mode: ProxyRuntimeEgressMode | string;
+  proxy_source: string;
+  has_proxy: boolean;
+  clearance_enabled: boolean;
+  clearance_mode: ProxyRuntimeClearanceMode | string;
+  has_clearance_bundle: boolean;
+  cached_clearance_hosts: string[];
+};
+
+export type ProxyRuntimeResponse = {
+  runtime: ProxyRuntimeSettings;
+  status: ProxyRuntimeStatus;
+};
+
+export type ThirdPartyAppsSettings = {
+  infinite_canvas: {
+    enabled: boolean;
+    url: string;
+  };
+};
+
 export type SettingsConfig = {
   proxy: string;
   base_url?: string;
@@ -125,6 +178,8 @@ export type SettingsConfig = {
   auto_relogin_after_refresh?: boolean;
   log_levels?: string[];
   image_storage?: ImageStorageSettings;
+  proxy_runtime?: ProxyRuntimeSettings;
+  third_party_apps?: ThirdPartyAppsSettings;
   backup?: BackupSettings;
   backup_state?: BackupState;
   [key: string]: unknown;
@@ -262,6 +317,14 @@ export type UserKey = {
   last_used_at: string | null;
 };
 
+export type OutlookPoolStats = {
+  unused: number;
+  in_use: number;
+  used: number;
+  token_invalid: number;
+  failed: number;
+};
+
 export type RegisterConfig = {
   enabled: boolean;
   mail: {
@@ -298,31 +361,6 @@ export type RegisterConfig = {
     text: string;
     level: string;
   }>;
-};
-
-export type OpenAIKeyStatus = "unchecked" | "ok" | "invalid" | "rate_limited" | "forbidden" | "error" | string;
-
-export type OpenAIKeyItem = {
-  id: string;
-  name: string;
-  key_hint: string;
-  status: OpenAIKeyStatus;
-  http_status?: number | null;
-  models_count: number;
-  sample_models: string[];
-  last_error?: string | null;
-  last_checked_at?: string | null;
-  created_at: string;
-  updated_at: string;
-};
-
-type OpenAIKeyListResponse = {
-  items: OpenAIKeyItem[];
-};
-
-type OpenAIKeyMutationResponse = {
-  item?: OpenAIKeyItem;
-  items: OpenAIKeyItem[];
 };
 
 export async function login(authKey: string) {
@@ -533,6 +571,10 @@ export async function updateSettingsConfig(settings: SettingsConfig) {
   });
 }
 
+export async function fetchThirdPartyApps() {
+  return httpRequest<{ third_party_apps: ThirdPartyAppsSettings }>("/api/third-party-apps");
+}
+
 export async function testBackupConnection() {
   return httpRequest<{ result: { ok: boolean; status: number } }>("/api/backup/test", {
     method: "POST",
@@ -722,29 +764,10 @@ export async function resetRegister() {
   return httpRequest<{ register: RegisterConfig }>("/api/register/reset", { method: "POST" });
 }
 
-// ── Official OpenAI API Keys ──────────────────────────────────────
-
-export async function fetchOpenAIKeys() {
-  return httpRequest<OpenAIKeyListResponse>("/api/openai-keys");
-}
-
-export async function createOpenAIKey(name: string, key: string, check = true) {
-  return httpRequest<Required<Pick<OpenAIKeyMutationResponse, "item">> & OpenAIKeyMutationResponse>("/api/openai-keys", {
+export async function resetOutlookPool(scope: "all" | "failed" | "unused" = "all") {
+  return httpRequest<{ register: RegisterConfig }>("/api/register/outlook-pool/reset", {
     method: "POST",
-    body: { name, key, check },
-  });
-}
-
-export async function checkOpenAIKey(keyId: string) {
-  return httpRequest<Required<Pick<OpenAIKeyMutationResponse, "item">> & OpenAIKeyMutationResponse>(
-    `/api/openai-keys/${keyId}/check`,
-    { method: "POST" },
-  );
-}
-
-export async function deleteOpenAIKey(keyId: string) {
-  return httpRequest<OpenAIKeyListResponse>(`/api/openai-keys/${keyId}`, {
-    method: "DELETE",
+    body: { scope },
   });
 }
 
@@ -926,6 +949,18 @@ export type ProxyTestResult = {
   status: number;
   latency_ms: number;
   error: string | null;
+  proxy_source?: string;
+  has_proxy?: boolean;
+};
+
+export type ClearanceTestResult = {
+  ok: boolean;
+  status: string;
+  latency_ms: number;
+  has_cookies: boolean;
+  user_agent: string;
+  error: string | null;
+  runtime: ProxyRuntimeStatus;
 };
 
 export async function fetchProxy() {
@@ -943,5 +978,23 @@ export async function testProxy(url?: string) {
   return httpRequest<{ result: ProxyTestResult }>("/api/proxy/test", {
     method: "POST",
     body: { url: url ?? "" },
+  });
+}
+
+export async function fetchProxyRuntime() {
+  return httpRequest<ProxyRuntimeResponse>("/api/proxy/runtime");
+}
+
+export async function updateProxyRuntime(runtime: ProxyRuntimeSettings) {
+  return httpRequest<ProxyRuntimeResponse>("/api/proxy/runtime", {
+    method: "POST",
+    body: runtime,
+  });
+}
+
+export async function testProxyClearance(targetUrl?: string) {
+  return httpRequest<{ result: ClearanceTestResult }>("/api/proxy/clearance/test", {
+    method: "POST",
+    body: { target_url: targetUrl ?? "https://chatgpt.com" },
   });
 }
