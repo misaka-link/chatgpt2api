@@ -18,7 +18,7 @@ from curl_cffi import requests
 
 from services.account_service import account_service
 from services.proxy_service import ClearanceBundle, proxy_settings
-from services.register import mail_provider
+from services.register import domain_reputation, mail_provider
 
 base_dir = Path(__file__).resolve().parent
 config = {
@@ -241,6 +241,44 @@ def create_mailbox(username: str | None = None) -> dict:
 
 def wait_for_code(mailbox: dict) -> str | None:
     return mail_provider.wait_for_code(_mail_config(), mailbox)
+
+
+class RegisterAttemptError(RuntimeError):
+    def __init__(self, reason: str, mailbox: dict | None = None):
+        super().__init__(reason)
+        self.reason = str(reason)
+        self.mailbox = dict(mailbox or {})
+
+    @property
+    def mail_provider(self) -> str:
+        return str(self.mailbox.get("provider") or "").strip()
+
+    @property
+    def mail_domain(self) -> str:
+        domain = str(self.mailbox.get("domain") or "").strip().lower()
+        if domain:
+            return domain
+        address = str(self.mailbox.get("address") or "").strip().lower()
+        return address.rsplit("@", 1)[-1] if "@" in address else ""
+
+
+def _record_mail_success(result: dict) -> None:
+    provider = str(result.get("mail_provider") or "").strip()
+    domain = str(result.get("mail_domain") or "").strip()
+    if provider and domain:
+        domain_reputation.store.record_success(provider, domain)
+
+
+def _record_mail_failure(error: Exception) -> dict:
+    if isinstance(error, mail_provider.LocalDomainFilteredError):
+        return {}
+    if not isinstance(error, RegisterAttemptError):
+        return {}
+    provider = error.mail_provider
+    domain = error.mail_domain
+    if not provider or not domain:
+        return {}
+    return domain_reputation.store.record_failure(provider, domain, error.reason)
 
 
 from utils.sentinel import SentinelTokenGenerator, build_sentinel_token as _build_sentinel_token_tuple  # noqa: F401
@@ -592,9 +630,12 @@ class PlatformRegistrar:
             self._validate_otp(code, index)
             self._create_account(f"{first_name} {last_name}", _random_birthdate(), index)
             tokens = self._exchange_registered_tokens(index)
+            mail_domain = str(mailbox.get("domain") or (email.rsplit("@", 1)[-1] if "@" in email else "")).strip().lower()
         except Exception as error:
             mail_provider.mark_mailbox_result(mailbox, success=False, error=error)
-            raise
+            if isinstance(error, mail_provider.LocalDomainFilteredError):
+                raise
+            raise RegisterAttemptError(str(error), mailbox) from error
         mail_provider.mark_mailbox_result(mailbox, success=True)
         return {
             "email": email,
@@ -602,6 +643,9 @@ class PlatformRegistrar:
             "access_token": str(tokens.get("access_token") or "").strip(),
             "refresh_token": str(tokens.get("refresh_token") or "").strip(),
             "id_token": str(tokens.get("id_token") or "").strip(),
+            "mail_provider": str(mailbox.get("provider") or "").strip(),
+            "mail_provider_ref": str(mailbox.get("provider_ref") or "").strip(),
+            "mail_domain": mail_domain,
             "source_type": "web",
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -613,6 +657,7 @@ def worker(index: int) -> dict:
     try:
         step(index, "任务启动")
         result = registrar.register(index)
+        _record_mail_success(result)
         cost = time.time() - start
         access_token = str(result["access_token"])
         account_service.add_account_items([result])
@@ -625,8 +670,14 @@ def worker(index: int) -> dict:
             avg = (time.time() - stats["start_time"]) / stats["success"]
         log(f'{result["email"]} 注册成功，本次耗时{cost:.1f}s，全局平均每个号注册耗时{avg:.1f}s', "green")
         return {"ok": True, "index": index, "result": result}
+    except mail_provider.LocalDomainFilteredError as e:
+        log(f"任务{index} 已跳过，本地邮箱域名信誉过滤: {e}", "yellow")
+        return {"ok": False, "skipped": True, "index": index, "reason": str(e)}
     except Exception as e:
         cost = time.time() - start
+        reputation = _record_mail_failure(e)
+        if reputation.get("disabled_changed") and isinstance(e, RegisterAttemptError):
+            log(f"邮箱域名已自动拉黑: {e.mail_domain}，原因: {reputation.get('bucket')}", "yellow")
         with stats_lock:
             stats["done"] += 1
             stats["fail"] += 1

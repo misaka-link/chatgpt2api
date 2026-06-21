@@ -18,6 +18,7 @@ from curl_cffi import requests
 
 
 from services.config import DATA_DIR
+from services.register import domain_reputation
 
 DDG_ALIASES_FILE = DATA_DIR / "ddg_aliases.json"
 _ddg_aliases_lock = Lock()
@@ -211,6 +212,79 @@ provider_index = 0
 cloudmail_token_lock = Lock()
 cloudmail_token_cache: dict[str, tuple[str, float]] = {}
 
+YYDS_DEFAULT_DOMAINS = (
+    "now-sohusports.com",
+    "10011.hzeg.eu.org",
+    "10086.hzeg.eu.org",
+    "dx.jesys.net",
+    "mail.sunshine8.site",
+    "mail.wuwang1028.bond",
+    "xiejiang.site",
+    "ai.2026157.xyz",
+    "mail.1m1.dpdns.org",
+    "tokenizer.qwen3-30b-a3b.xyz",
+    "15768.xyz",
+    "israeloil.abrdns.com",
+    "mmail.wuwang1028.bond",
+    "rs.sdfe.app",
+    "tm.spkun.org",
+    "wyattcloud.vip",
+    "xiaolajiao.dedyn.io",
+    "znhyo.dpdns.org",
+    "20220108.xyz",
+    "666162.xyz",
+    "a0.engineer",
+    "a0.jesys.net",
+    "app.longlivethepeople.dpdns.org",
+    "dsqcyy.com",
+    "email.fibcbxa.shop",
+    "lingeriesceinturesfemme.com",
+    "lsa1230.dpdns.org",
+    "xuicf1r.site",
+    "yyds.tadeo.bond",
+    "chatgpt.qwen3-30b-a3b.xyz",
+    "emoij.indevs.in",
+    "579199.xyz",
+    "chen-hai.sryze.cc",
+    "lvcaodibeer.com",
+    "mail.0m0.email",
+    "mail.tadeo.bond",
+    "mailx.04.mom",
+    "microsoftazureamazonawsibmapplenvidiaoracleciscoadobe.com",
+    "tynxbzz.com",
+    "vnn.indevs.in",
+    "xiaolajiao.tech",
+    "yyds.wessvan.com",
+    "blueshieldpharma.com",
+    "flowmail.site",
+    "luguangtech.com",
+    "mm.rc0101.site",
+    "r4.sdfe.app",
+    "sn6fk3.nsmjj.tech",
+    "tm.488448.xyz",
+    "0m0.app",
+    "21sad.xyz",
+    "908209381.shop",
+    "9l.sdfe.app",
+    "api.qwen3-30b-a3b.xyz",
+    "d.729406.xyz",
+    "dschat.asia",
+    "edumail.zenithsr.pro",
+    "em.rc0101.site",
+    "hgu717.ninja",
+    "letv377.nsmjj.tech",
+    "misty.indevs.in",
+    "ncyc7b.2026157.xyz",
+    "work.2026157.xyz",
+    "xddroot.eu.org",
+    "det.indevs.in",
+    "l8.jesys.net",
+)
+
+
+class LocalDomainFilteredError(RuntimeError):
+    """Raised when local domain reputation leaves no usable domain."""
+
 
 def _config(mail_config: dict) -> dict:
     return {
@@ -228,6 +302,27 @@ def _random_mailbox_name() -> str:
 
 def _random_subdomain_label() -> str:
     return "".join(random.choices(string.ascii_lowercase + string.digits, k=random.randint(4, 10)))
+
+
+def _bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _ratio(value: Any, default: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = default
+    return max(0.0, min(1.0, number))
 
 
 def _next_domain(domains: list[str]) -> str:
@@ -1001,12 +1096,16 @@ class InbucketMailProvider(BaseMailProvider):
 
 class YydsMailProvider(BaseMailProvider):
     name = "yyds_mail"
+    retry_statuses = {429, 500, 502, 503, 504}
 
     def __init__(self, entry: dict, conf: dict):
         super().__init__(conf, str(entry.get("provider_ref") or ""))
         self.api_base = str(entry.get("api_base") or "https://maliapi.215.im/v1").rstrip("/")
         self.api_key = str(entry["api_key"]).strip()
         self.domain = [str(item).strip() for item in (entry.get("domain") or []) if str(item).strip()]
+        self.learning_mode = _bool(entry.get("learning_mode"), _bool(entry.get("domain_learning"), False))
+        self.domain_learning = self.learning_mode
+        self.domain_explore_rate = _ratio(entry.get("domain_explore_rate"), 0.12 if self.learning_mode else 0.0)
         self.subdomain = str(entry.get("subdomain") or "").strip()
         self.wildcard = bool(entry.get("wildcard"))
         self.session = _create_session(conf)
@@ -1028,10 +1127,27 @@ class YydsMailProvider(BaseMailProvider):
     def _items(data):
         return data if isinstance(data, list) else data.get("items") or data.get("messages") or data.get("data") or []
 
+    def _select_domain(self) -> str:
+        seed_domains = self.domain or list(YYDS_DEFAULT_DOMAINS)
+        if not self.learning_mode:
+            usable = domain_reputation.store.usable_domains(self.name, seed_domains)
+            if usable:
+                return _next_domain(usable)
+            raise LocalDomainFilteredError("YYDSMail 可用域名为空：白名单域名已全部被本地标记过滤，跳过本次注册")
+
+        if random.random() < self.domain_explore_rate:
+            return ""
+        domains = [*domain_reputation.store.good_domains(self.name), *seed_domains]
+        preferred = domain_reputation.store.preferred_domains(self.name, domains)
+        if preferred:
+            return _next_domain(preferred)
+        return ""
+
     def create_mailbox(self, username: str | None = None) -> dict[str, Any]:
         payload = {"localPart": username or _random_mailbox_name()}
-        if self.domain:
-            payload["domain"] = _next_domain(self.domain)
+        domain = self._select_domain()
+        if domain:
+            payload["domain"] = domain
         if self.subdomain:
             payload["subdomain"] = self.subdomain
         data = self._request("POST", "/accounts/wildcard" if self.wildcard else "/accounts", payload=payload)
@@ -1039,7 +1155,8 @@ class YydsMailProvider(BaseMailProvider):
         token = str(data.get("token") or data.get("temp_token") or data.get("tempToken") or data.get("access_token") or "").strip()
         if not address or not token:
             raise RuntimeError("YYDSMail 缺少 address 或 token")
-        return {"provider": self.name, "provider_ref": self.provider_ref, "address": address, "token": token, "account_id": str(data.get("id") or "")}
+        domain = address.rsplit("@", 1)[-1].strip().lower() if "@" in address else str(payload.get("domain") or "").strip().lower()
+        return {"provider": self.name, "provider_ref": self.provider_ref, "address": address, "domain": domain, "token": token, "account_id": str(data.get("id") or "")}
 
     def fetch_latest_message(self, mailbox: dict[str, Any]) -> dict[str, Any] | None:
         data = self._request("GET", "/messages", token=str(mailbox.get("token") or ""), params={"address": mailbox["address"]})
