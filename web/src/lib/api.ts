@@ -340,6 +340,7 @@ export type RegisterConfig = {
   target_quota: number;
   target_available: number;
   check_interval: number;
+  account_refresh_interval_minute: number;
   stats: {
     job_id?: string;
     success: number;
@@ -355,6 +356,11 @@ export type RegisterConfig = {
     started_at?: string;
     updated_at?: string;
     finished_at?: string;
+    account_refresh_last_run_at?: string | null;
+    account_refresh_next_run_at?: string | null;
+    account_refresh_status?: string;
+    account_refresh_last_error?: string | null;
+    account_refresh_last_refreshed?: number;
   };
   logs?: Array<{
     time: string;

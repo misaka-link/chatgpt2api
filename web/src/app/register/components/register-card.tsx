@@ -22,6 +22,7 @@ export function RegisterCard() {
   const setTargetQuota = useSettingsStore((state) => state.setRegisterTargetQuota);
   const setTargetAvailable = useSettingsStore((state) => state.setRegisterTargetAvailable);
   const setCheckInterval = useSettingsStore((state) => state.setRegisterCheckInterval);
+  const setAccountRefreshIntervalMinute = useSettingsStore((state) => state.setRegisterAccountRefreshIntervalMinute);
   const setMailField = useSettingsStore((state) => state.setRegisterMailField);
   const addProvider = useSettingsStore((state) => state.addRegisterProvider);
   const updateProvider = useSettingsStore((state) => state.updateRegisterProvider);
@@ -44,6 +45,29 @@ export function RegisterCard() {
   const stats = config.stats || { success: 0, fail: 0, done: 0, running: 0, threads: config.threads };
   const providers = config.mail.providers || [];
   const logs = config.logs || [];
+  const formatRunTime = (value?: string | null) => {
+    if (!value) return "未运行";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "未运行";
+    return new Intl.DateTimeFormat(undefined, {
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    }).format(date);
+  };
+  const refreshStatusText: Record<string, string> = {
+    disabled: "未启用",
+    idle: "待机",
+    waiting: "等待中",
+    running: "运行中",
+    success: "成功",
+    partial: "部分失败",
+    empty: "无账号",
+    error: "失败",
+  };
   const updateProviderType = (index: number, type: string) => {
     updateProvider(index, {
       type,
@@ -121,6 +145,10 @@ export function RegisterCard() {
             <div className="space-y-2">
               <label className="text-sm text-stone-700">检查间隔（秒）</label>
               <Input value={String(config.check_interval || "")} onChange={(event) => setCheckInterval(event.target.value)} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled || config.mode === "total"} />
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm text-stone-700">账号额度刷新间隔（分钟）</label>
+              <Input value={String(config.account_refresh_interval_minute || "")} onChange={(event) => setAccountRefreshIntervalMinute(event.target.value)} className="h-10 rounded-xl border-stone-200 bg-white" disabled={config.enabled} placeholder="0 表示关闭" />
             </div>
           </div>
 
@@ -398,10 +426,14 @@ export function RegisterCard() {
                 ["平均注册单个", `${stats.avg_seconds || 0}s`],
                 ["当前额度", stats.current_quota || 0],
                 ["正常账号", stats.current_available || 0],
+                ["刷新账号&额度上次运行时间", formatRunTime(stats.account_refresh_last_run_at)],
+                ["刷新账号&额度下次运行时间", config.account_refresh_interval_minute > 0 ? formatRunTime(stats.account_refresh_next_run_at) : "未启用"],
+                ["刷新状态", `${refreshStatusText[String(stats.account_refresh_status || "idle")] || String(stats.account_refresh_status || "待机")}${stats.account_refresh_last_refreshed ? ` / ${stats.account_refresh_last_refreshed}` : ""}`],
+                ["刷新错误", stats.account_refresh_last_error || "-"],
               ].map(([label, value]) => (
                 <div key={label} className="border border-stone-200 bg-white/70 px-3 py-2">
                   <div className="text-xs text-stone-400">{label}</div>
-                  <div className="mt-1 text-base font-semibold text-stone-800">{value}</div>
+                  <div className="mt-1 break-words text-sm font-semibold text-stone-800">{value}</div>
                 </div>
               ))}
             </div>

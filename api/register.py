@@ -20,6 +20,7 @@ class RegisterConfigRequest(BaseModel):
     target_quota: int | None = None
     target_available: int | None = None
     check_interval: int | None = None
+    account_refresh_interval_minute: int | None = None
 
 
 class OutlookPoolResetRequest(BaseModel):

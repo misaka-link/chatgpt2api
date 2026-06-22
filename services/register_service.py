@@ -37,7 +37,7 @@ def _now() -> str:
 
 
 def _default_config() -> dict:
-    return {**openai_register.config, "mode": "total", "target_quota": 100, "target_available": 10, "check_interval": 5, "enabled": False, "stats": {"success": 0, "fail": 0, "done": 0, "running": 0, "threads": openai_register.config["threads"], "elapsed_seconds": 0, "avg_seconds": 0, "success_rate": 0, "current_quota": 0, "current_available": 0}}
+    return {**openai_register.config, "mode": "total", "target_quota": 100, "target_available": 10, "check_interval": 5, "account_refresh_interval_minute": 0, "enabled": False, "stats": {"success": 0, "fail": 0, "done": 0, "running": 0, "threads": openai_register.config["threads"], "elapsed_seconds": 0, "avg_seconds": 0, "success_rate": 0, "current_quota": 0, "current_available": 0, "account_refresh_last_run_at": None, "account_refresh_next_run_at": None, "account_refresh_status": "idle", "account_refresh_last_error": None, "account_refresh_last_refreshed": 0}}
 
 
 def _normalize(raw: dict) -> dict:
@@ -49,6 +49,7 @@ def _normalize(raw: dict) -> dict:
     cfg["target_quota"] = max(1, int(cfg.get("target_quota") or 1))
     cfg["target_available"] = max(1, int(cfg.get("target_available") or 1))
     cfg["check_interval"] = max(1, int(cfg.get("check_interval") or 5))
+    cfg["account_refresh_interval_minute"] = max(0, int(cfg.get("account_refresh_interval_minute") or 0))
     cfg["proxy"] = str(cfg.get("proxy") or "").strip()
     if isinstance(cfg.get("mail"), dict):
         cfg["mail"].pop("proxy", None)
@@ -178,7 +179,23 @@ class RegisterService:
             self._drop_mail_proxy()
             self._logs = []
             metrics = self._pool_metrics()
-            self._config["stats"] = {"job_id": uuid.uuid4().hex, "success": 0, "fail": 0, "done": 0, "running": 0, "threads": self._config["threads"], **metrics, "started_at": _now(), "updated_at": _now()}
+            previous_stats = self._config.get("stats") if isinstance(self._config.get("stats"), dict) else {}
+            self._config["stats"] = {
+                "job_id": uuid.uuid4().hex,
+                "success": 0,
+                "fail": 0,
+                "done": 0,
+                "running": 0,
+                "threads": self._config["threads"],
+                **metrics,
+                "account_refresh_last_run_at": previous_stats.get("account_refresh_last_run_at"),
+                "account_refresh_next_run_at": previous_stats.get("account_refresh_next_run_at"),
+                "account_refresh_status": previous_stats.get("account_refresh_status") or "idle",
+                "account_refresh_last_error": previous_stats.get("account_refresh_last_error"),
+                "account_refresh_last_refreshed": previous_stats.get("account_refresh_last_refreshed") or 0,
+                "started_at": _now(),
+                "updated_at": _now(),
+            }
             openai_register.config.update({k: self._config[k] for k in ("mail", "proxy", "total", "threads")})
             with openai_register.stats_lock:
                 openai_register.stats.update({"done": 0, "success": 0, "fail": 0, "start_time": time.time()})
@@ -198,8 +215,25 @@ class RegisterService:
 
     def reset(self) -> dict:
         with self._lock:
+            previous_stats = self._config.get("stats") if isinstance(self._config.get("stats"), dict) else {}
             self._logs = []
-            self._config["stats"] = {"success": 0, "fail": 0, "done": 0, "running": 0, "threads": self._config["threads"], "elapsed_seconds": 0, "avg_seconds": 0, "success_rate": 0, **self._pool_metrics(), "updated_at": _now()}
+            self._config["stats"] = {
+                "success": 0,
+                "fail": 0,
+                "done": 0,
+                "running": 0,
+                "threads": self._config["threads"],
+                "elapsed_seconds": 0,
+                "avg_seconds": 0,
+                "success_rate": 0,
+                **self._pool_metrics(),
+                "account_refresh_last_run_at": previous_stats.get("account_refresh_last_run_at"),
+                "account_refresh_next_run_at": previous_stats.get("account_refresh_next_run_at"),
+                "account_refresh_status": previous_stats.get("account_refresh_status") or "idle",
+                "account_refresh_last_error": previous_stats.get("account_refresh_last_error"),
+                "account_refresh_last_refreshed": previous_stats.get("account_refresh_last_refreshed") or 0,
+                "updated_at": _now(),
+            }
             with openai_register.stats_lock:
                 openai_register.stats.update({"done": 0, "success": 0, "fail": 0, "start_time": 0.0})
             self._save()
@@ -268,6 +302,98 @@ class RegisterService:
                 stats["success_rate"] = round(success * 100 / max(1, success + fail), 1)
             self._config["stats"]["updated_at"] = _now()
             self._save()
+
+    def _set_account_refresh_state(self, **updates) -> None:
+        with self._lock:
+            stats = self._config.setdefault("stats", {})
+            if not isinstance(stats, dict):
+                stats = {}
+                self._config["stats"] = stats
+            stats.update(updates)
+            stats["updated_at"] = _now()
+            self._save()
+
+    @staticmethod
+    def _time_from_monotonic(target: float) -> str:
+        remaining = max(0.0, target - time.monotonic())
+        return datetime.fromtimestamp(time.time() + remaining, timezone.utc).isoformat()
+
+    def start_account_refresh_scheduler(self, stop_event: threading.Event) -> threading.Thread:
+        def worker() -> None:
+            next_run_at: float | None = None
+            last_interval = -1
+            while not stop_event.is_set():
+                try:
+                    with self._lock:
+                        interval = max(0, int(self._config.get("account_refresh_interval_minute") or 0))
+                    if interval <= 0:
+                        if next_run_at is not None or last_interval != interval:
+                            self._set_account_refresh_state(
+                                account_refresh_next_run_at=None,
+                                account_refresh_status="disabled",
+                            )
+                        next_run_at = None
+                        last_interval = interval
+                        stop_event.wait(5)
+                        continue
+
+                    interval_seconds = interval * 60
+                    now_monotonic = time.monotonic()
+                    if next_run_at is None or interval != last_interval:
+                        next_run_at = now_monotonic + interval_seconds
+                        last_interval = interval
+                        self._set_account_refresh_state(
+                            account_refresh_next_run_at=self._time_from_monotonic(next_run_at),
+                            account_refresh_status="waiting",
+                        )
+
+                    remaining = next_run_at - now_monotonic
+                    if remaining > 0:
+                        stop_event.wait(min(5, remaining))
+                        continue
+
+                    started_at = _now()
+                    next_run_at = time.monotonic() + interval_seconds
+                    tokens = account_service.list_tokens()
+                    self._set_account_refresh_state(
+                        account_refresh_status="running",
+                        account_refresh_last_run_at=started_at,
+                        account_refresh_next_run_at=self._time_from_monotonic(next_run_at),
+                        account_refresh_last_error=None,
+                    )
+                    if tokens:
+                        result = account_service.refresh_accounts(tokens, None, False)
+                        errors = result.get("errors") if isinstance(result, dict) else []
+                        self._set_account_refresh_state(
+                            account_refresh_status="success" if not errors else "partial",
+                            account_refresh_last_run_at=_now(),
+                            account_refresh_next_run_at=self._time_from_monotonic(next_run_at),
+                            account_refresh_last_error=None if not errors else f"{len(errors)} 个账号刷新失败",
+                            account_refresh_last_refreshed=int(result.get("refreshed") or 0),
+                            **self._pool_metrics(),
+                        )
+                    else:
+                        self._set_account_refresh_state(
+                            account_refresh_status="empty",
+                            account_refresh_last_run_at=_now(),
+                            account_refresh_next_run_at=self._time_from_monotonic(next_run_at),
+                            account_refresh_last_error=None,
+                            account_refresh_last_refreshed=0,
+                            **self._pool_metrics(),
+                        )
+                except Exception as exc:
+                    next_run_at = time.monotonic() + max(60, last_interval * 60 if last_interval > 0 else 60)
+                    self._set_account_refresh_state(
+                        account_refresh_status="error",
+                        account_refresh_last_run_at=_now(),
+                        account_refresh_next_run_at=self._time_from_monotonic(next_run_at),
+                        account_refresh_last_error=str(exc),
+                    )
+                    stop_event.wait(5)
+
+        thread = threading.Thread(target=worker, daemon=True, name="register-account-refresh")
+        thread.start()
+        return thread
 
     def _run(self) -> None:
         threads = int(self.get()["threads"])
