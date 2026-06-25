@@ -18,6 +18,8 @@ CACHEABLE_TEXT_KEYS = {
     "model",
     "presence_penalty",
     "reasoning_effort",
+    "thinking_effort",
+    "reasoning",
     "response_format",
     "seed",
     "stop",

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
++ [新增] 合入上游 `4fa120b`：调试页支持图片输入，Chat Completions / Responses 支持透传 `reasoning_effort`、`thinking_effort` 和 `reasoning.effort`。
+
 ## 1.5.0 - 2026-06-13
 
 + [新增] 新增 WARP / Privoxy / FlareSolverr 清障方案，注册遇到 Cloudflare 拦截后可刷新 clearance 并重试。
