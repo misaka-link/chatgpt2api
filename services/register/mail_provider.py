@@ -32,6 +32,7 @@ OUTLOOK_UNAVAILABLE_STATES = {"used", "token_invalid", "failed"}
 MAIL_API_429_COOLDOWN_SECONDS = 30
 mail_api_cooldown_lock = Lock()
 mail_api_cooldown_until = 0.0
+YYDS_DOMAINS_CACHE_SECONDS = 600.0
 
 
 def _load_ddg_aliases() -> set[str]:
@@ -346,6 +347,55 @@ def _normalize_string_list(value: Any) -> list[str]:
         return [str(item).strip() for item in value if str(item).strip()]
     text = str(value or "").strip()
     return [text] if text else []
+
+
+def _normalize_domain_text(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    if "://" in text:
+        text = text.split("://", 1)[-1]
+    if "@" in text:
+        text = text.rsplit("@", 1)[-1]
+    text = text.split("/", 1)[0]
+    return text.strip(".")
+
+
+def _extract_yyds_domains(data: Any) -> list[str]:
+    if isinstance(data, dict):
+        raw_items = data.get("items") or data.get("domains") or data.get("data") or []
+        items = raw_items if isinstance(raw_items, list) else [raw_items]
+    elif isinstance(data, list):
+        items = data
+    else:
+        items = []
+    domains: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        if isinstance(item, dict):
+            if any(key in item and not _bool(item.get(key)) for key in ("available", "isAvailable", "enabled", "active")):
+                continue
+            raw = ""
+            for key in ("domain", "name", "value", "host", "fqdn"):
+                raw = str(item.get(key) or "").strip()
+                if raw:
+                    break
+            if not raw:
+                nested = item.get("domains")
+                if isinstance(nested, list):
+                    for nested_item in nested:
+                        domain = _normalize_domain_text(nested_item)
+                        if domain and domain not in seen:
+                            seen.add(domain)
+                            domains.append(domain)
+                continue
+        else:
+            raw = str(item or "").strip()
+        domain = _normalize_domain_text(raw)
+        if domain and domain not in seen:
+            seen.add(domain)
+            domains.append(domain)
+    return domains
 
 
 def _create_session(conf: dict):
@@ -1138,6 +1188,7 @@ class YydsMailProvider(BaseMailProvider):
         self.domain_explore_rate = _ratio(entry.get("domain_explore_rate"), 0.12 if self.learning_mode else 0.0)
         self.subdomain = str(entry.get("subdomain") or "").strip()
         self.wildcard = bool(entry.get("wildcard"))
+        self._available_domains_cache: tuple[float, list[str]] | None = None
         self.session = _create_session(conf)
         self.session.headers.update({"User-Agent": conf["user_agent"], "Accept": "application/json", "Content-Type": "application/json"})
 
@@ -1157,30 +1208,75 @@ class YydsMailProvider(BaseMailProvider):
     def _items(data):
         return data if isinstance(data, list) else data.get("items") or data.get("messages") or data.get("data") or []
 
-    def _select_domain(self) -> str:
-        seed_domains = self.domain or list(YYDS_DEFAULT_DOMAINS)
+    def _fetch_available_domains(self) -> list[str]:
+        cached = self._available_domains_cache
+        now = time.monotonic()
+        if cached and now - cached[0] < YYDS_DOMAINS_CACHE_SECONDS:
+            return list(cached[1])
+        try:
+            data = self._request("GET", "/domains")
+        except Exception:
+            return list(cached[1]) if cached else []
+        domains = _extract_yyds_domains(data)
+        self._available_domains_cache = (now, domains)
+        return list(domains)
+
+    def _select_domain(self, allow_empty: bool = False, seed_domains: list[str] | None = None, include_learned: bool = True) -> str:
+        seed_domains = [str(item).strip() for item in (seed_domains or self.domain or self._fetch_available_domains()) if str(item).strip()]
+        if not seed_domains:
+            if allow_empty:
+                return ""
+            raise LocalDomainFilteredError("YYDSMail 未配置可用域名，且 /v1/domains 未返回可用域名")
         if not self.learning_mode:
             usable = domain_reputation.store.usable_domains(self.name, seed_domains)
             if usable:
                 return _next_domain(usable)
             raise LocalDomainFilteredError("YYDSMail 可用域名为空：白名单域名已全部被本地标记过滤，跳过本次注册")
 
-        if random.random() < self.domain_explore_rate:
+        if allow_empty and random.random() < self.domain_explore_rate:
             return ""
-        domains = [*domain_reputation.store.good_domains(self.name), *seed_domains]
+        domains = [*domain_reputation.store.good_domains(self.name), *seed_domains] if include_learned else seed_domains
         preferred = domain_reputation.store.preferred_domains(self.name, domains)
         if preferred:
             return _next_domain(preferred)
-        return ""
+        if allow_empty:
+            return ""
+        usable = domain_reputation.store.usable_domains(self.name, seed_domains)
+        if usable:
+            return _next_domain(usable)
+        if seed_domains:
+            return _next_domain(seed_domains)
+        raise LocalDomainFilteredError("YYDSMail 未配置可用域名，且 /v1/domains 未返回可用域名")
 
     def create_mailbox(self, username: str | None = None) -> dict[str, Any]:
         payload = {"localPart": username or _random_mailbox_name()}
-        domain = self._select_domain()
-        if domain:
-            payload["domain"] = domain
-        if self.subdomain:
-            payload["subdomain"] = self.subdomain
-        data = self._request("POST", "/accounts/wildcard" if self.wildcard else "/accounts", payload=payload)
+        if self.wildcard:
+            api_domains = self._fetch_available_domains()
+            seed_domains = api_domains or self.domain
+            if api_domains:
+                domain = self._select_domain(allow_empty=True, seed_domains=api_domains, include_learned=False)
+                if domain:
+                    payload["domain"] = domain
+            elif seed_domains:
+                domain = self._select_domain(allow_empty=True, seed_domains=seed_domains)
+                if domain:
+                    payload["domain"] = domain
+            if self.subdomain:
+                payload["subdomain"] = self.subdomain
+            data = self._request("POST", "/accounts/wildcard", payload=payload)
+        else:
+            api_domains = self._fetch_available_domains()
+            seed_domains = api_domains or self.domain
+            if api_domains:
+                payload["domain"] = self._select_domain(seed_domains=api_domains, include_learned=False)
+            elif seed_domains:
+                payload["domain"] = self._select_domain(seed_domains=seed_domains)
+            else:
+                # 让 YYDS 官方选择当前可用域名，避免继续使用仓库内置的过期静态域名。
+                payload["autoDomainStrategy"] = "balanced"
+            if self.subdomain:
+                payload["subdomain"] = self.subdomain
+            data = self._request("POST", "/accounts", payload=payload)
         address = str(data.get("address") or data.get("email") or "").strip()
         token = str(data.get("token") or data.get("temp_token") or data.get("tempToken") or data.get("access_token") or "").strip()
         if not address or not token:

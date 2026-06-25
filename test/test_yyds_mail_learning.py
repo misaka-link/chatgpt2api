@@ -43,6 +43,7 @@ def test_yyds_non_learning_filters_disabled_domains(monkeypatch, tmp_path):
         {"provider_ref": "yyds_mail#1", "api_key": "token", "domain": ["bad.test"], "learning_mode": False},
         {"request_timeout": 1, "wait_timeout": 1, "wait_interval": 1, "user_agent": "pytest", "proxy": ""},
     )
+    provider._request = lambda *args, **kwargs: {"items": []}
     try:
         with pytest.raises(mail_provider.LocalDomainFilteredError):
             provider.create_mailbox()
@@ -68,6 +69,8 @@ def test_yyds_learning_prefers_successful_domains(monkeypatch, tmp_path):
     payloads = []
 
     def fake_request(method, path, token="", params=None, payload=None, expected=(200, 201, 204)):
+        if path == "/domains":
+            return {"items": []}
         payloads.append(dict(payload or {}))
         return {"address": "user@good.test", "token": "mail-token"}
 
@@ -79,6 +82,98 @@ def test_yyds_learning_prefers_successful_domains(monkeypatch, tmp_path):
 
     assert payloads[0]["domain"] == "good.test"
     assert mailbox["domain"] == "good.test"
+
+
+def test_yyds_uses_available_domains_from_api(monkeypatch, tmp_path):
+    store = domain_reputation.DomainReputationStore(tmp_path / "mail_domain_reputation.json")
+    monkeypatch.setattr(domain_reputation, "store", store)
+
+    provider = mail_provider.YydsMailProvider(
+        {"provider_ref": "yyds_mail#1", "api_key": "token", "domain": [], "learning_mode": False},
+        {"request_timeout": 1, "wait_timeout": 1, "wait_interval": 1, "user_agent": "pytest", "proxy": ""},
+    )
+    requests = []
+
+    def fake_request(method, path, token="", params=None, payload=None, expected=(200, 201, 204)):
+        requests.append((method, path, dict(payload or {})))
+        if path == "/domains":
+            return {
+                "items": [
+                    {"domain": "https://disabled.test/path", "available": False},
+                    {"domain": "fresh.test", "available": True},
+                    {"name": "user@fresh.test", "enabled": True},
+                ]
+            }
+        return {"address": f"user@{payload['domain']}", "token": "mail-token"}
+
+    provider._request = fake_request
+    try:
+        mailbox = provider.create_mailbox("user")
+    finally:
+        provider.close()
+
+    assert requests[0][:2] == ("GET", "/domains")
+    assert requests[1] == ("POST", "/accounts", {"localPart": "user", "domain": "fresh.test"})
+    assert mailbox["domain"] == "fresh.test"
+
+
+def test_yyds_api_domains_take_priority_over_configured_domains(monkeypatch, tmp_path):
+    store = domain_reputation.DomainReputationStore(tmp_path / "mail_domain_reputation.json")
+    monkeypatch.setattr(domain_reputation, "store", store)
+    store.record_success("yyds_mail", "configured.test")
+
+    provider = mail_provider.YydsMailProvider(
+        {
+            "provider_ref": "yyds_mail#1",
+            "api_key": "token",
+            "domain": ["configured.test"],
+            "learning_mode": True,
+            "domain_explore_rate": 0,
+        },
+        {"request_timeout": 1, "wait_timeout": 1, "wait_interval": 1, "user_agent": "pytest", "proxy": ""},
+    )
+    payloads = []
+
+    def fake_request(method, path, token="", params=None, payload=None, expected=(200, 201, 204)):
+        if path == "/domains":
+            return {"items": [{"domain": "api.test", "available": True}]}
+        payloads.append(dict(payload or {}))
+        return {"address": f"user@{payload['domain']}", "token": "mail-token"}
+
+    provider._request = fake_request
+    try:
+        mailbox = provider.create_mailbox("user")
+    finally:
+        provider.close()
+
+    assert payloads == [{"localPart": "user", "domain": "api.test"}]
+    assert mailbox["domain"] == "api.test"
+
+
+def test_yyds_falls_back_to_auto_domain_strategy_when_domain_api_empty(monkeypatch, tmp_path):
+    store = domain_reputation.DomainReputationStore(tmp_path / "mail_domain_reputation.json")
+    monkeypatch.setattr(domain_reputation, "store", store)
+
+    provider = mail_provider.YydsMailProvider(
+        {"provider_ref": "yyds_mail#1", "api_key": "token", "domain": [], "learning_mode": False},
+        {"request_timeout": 1, "wait_timeout": 1, "wait_interval": 1, "user_agent": "pytest", "proxy": ""},
+    )
+    payloads = []
+
+    def fake_request(method, path, token="", params=None, payload=None, expected=(200, 201, 204)):
+        if path == "/domains":
+            return {"items": []}
+        payloads.append(dict(payload or {}))
+        return {"address": "user@auto.test", "token": "mail-token"}
+
+    provider._request = fake_request
+    try:
+        mailbox = provider.create_mailbox("user")
+    finally:
+        provider.close()
+
+    assert payloads == [{"localPart": "user", "autoDomainStrategy": "balanced"}]
+    assert mailbox["domain"] == "auto.test"
 
 
 def test_register_records_yyds_domain_reputation(monkeypatch, tmp_path):
