@@ -29,6 +29,9 @@ _outlook_token_state_lock = Lock()
 OUTLOOK_IN_USE_STALE_SECONDS = 3600
 OUTLOOK_RECORDED_STATES = {"used", "in_use", "token_invalid", "failed"}
 OUTLOOK_UNAVAILABLE_STATES = {"used", "token_invalid", "failed"}
+MAIL_API_429_COOLDOWN_SECONDS = 30
+mail_api_cooldown_lock = Lock()
+mail_api_cooldown_until = 0.0
 
 
 def _load_ddg_aliases() -> set[str]:
@@ -353,6 +356,31 @@ def _create_session(conf: dict):
     return requests.Session(**kwargs)
 
 
+def _mail_api_request(session, method: str, url: str, **kwargs):
+    _wait_mail_api_cooldown()
+    resp = session.request(method.upper(), url, **kwargs)
+    if resp.status_code == 429:
+        _activate_mail_api_cooldown()
+        _wait_mail_api_cooldown()
+        resp = session.request(method.upper(), url, **kwargs)
+    return resp
+
+
+def _activate_mail_api_cooldown() -> None:
+    global mail_api_cooldown_until
+    with mail_api_cooldown_lock:
+        mail_api_cooldown_until = max(mail_api_cooldown_until, time.monotonic() + MAIL_API_429_COOLDOWN_SECONDS)
+
+
+def _wait_mail_api_cooldown() -> None:
+    while True:
+        with mail_api_cooldown_lock:
+            remaining = mail_api_cooldown_until - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(remaining)
+
+
 def _parse_received_at(value: Any) -> datetime | None:
     if isinstance(value, (int, float)):
         try:
@@ -512,7 +540,7 @@ class CloudflareTempMailProvider(BaseMailProvider):
         self.session = _create_session(conf)
 
     def _request(self, method: str, path: str, headers: dict | None = None, params: dict | None = None, payload: dict | None = None, expected: tuple[int, ...] = (200,)):
-        resp = self.session.request(method.upper(), f"{self.api_base}{path}", headers={"Content-Type": "application/json", "User-Agent": self.conf["user_agent"], **(headers or {})}, params=params, json=payload, timeout=self.conf["request_timeout"], verify=False)
+        resp = _mail_api_request(self.session, method, f"{self.api_base}{path}", headers={"Content-Type": "application/json", "User-Agent": self.conf["user_agent"], **(headers or {})}, params=params, json=payload, timeout=self.conf["request_timeout"], verify=False)
         if resp.status_code not in expected:
             raise RuntimeError(f"CloudflareTempMail 请求失败: {method} {path}, HTTP {resp.status_code}, body={resp.text[:300]}")
         return {} if resp.status_code == 204 else resp.json()
@@ -583,13 +611,13 @@ class DDGMailProvider(BaseMailProvider):
             merged_headers["x-admin-auth"] = self.cf_admin_password
         if self.cf_api_key and self.cf_auth_mode == "query-key":
             params = {**(params or {}), "key": self.cf_api_key}
-        resp = self.session.request(method.upper(), f"{self.cf_api_base}{path}", headers=merged_headers, params=params, json=payload, timeout=self.conf["request_timeout"], verify=False)
+        resp = _mail_api_request(self.session, method, f"{self.cf_api_base}{path}", headers=merged_headers, params=params, json=payload, timeout=self.conf["request_timeout"], verify=False)
         if resp.status_code not in expected:
             raise RuntimeError(f"DDGMail CF请求失败: {method} {path}, HTTP {resp.status_code}, body={resp.text[:300]}")
         return {} if resp.status_code == 204 else resp.json()
 
     def _ddg_request(self, method: str, path: str, payload: dict | None = None) -> dict:
-        resp = self.session.request(method.upper(), f"https://quack.duckduckgo.com{path}", headers={"Authorization": f"Bearer {self.ddg_token}", "Content-Type": "application/json", "User-Agent": self.conf["user_agent"]}, json=payload, timeout=self.conf["request_timeout"], verify=False)
+        resp = _mail_api_request(self.session, method, f"https://quack.duckduckgo.com{path}", headers={"Authorization": f"Bearer {self.ddg_token}", "Content-Type": "application/json", "User-Agent": self.conf["user_agent"]}, json=payload, timeout=self.conf["request_timeout"], verify=False)
         if resp.status_code not in (200, 201):
             raise RuntimeError(f"DDG API请求失败: {method} {path}, HTTP {resp.status_code}, body={resp.text[:300]}")
         return resp.json()
@@ -695,7 +723,8 @@ class CloudMailGenProvider(BaseMailProvider):
         payload: dict | None = None,
         expected: tuple[int, ...] = (200,),
     ):
-        resp = self.session.request(
+        resp = _mail_api_request(
+            self.session,
             method.upper(),
             f"{self.api_base}{path}",
             headers={
@@ -812,7 +841,7 @@ class TempMailLolProvider(BaseMailProvider):
         return text, False
 
     def _request(self, method: str, path: str, params: dict | None = None, payload: dict | None = None, expected: tuple[int, ...] = (200,)):
-        resp = self.session.request(method.upper(), f"https://api.tempmail.lol/v2{path}", params=params, json=payload, timeout=self.conf["request_timeout"], verify=False)
+        resp = _mail_api_request(self.session, method, f"https://api.tempmail.lol/v2{path}", params=params, json=payload, timeout=self.conf["request_timeout"], verify=False)
         if resp.status_code not in expected:
             raise RuntimeError(f"TempMail.lol 请求失败: {method} {path}, HTTP {resp.status_code}, body={resp.text[:300]}")
         data = resp.json()
@@ -862,7 +891,7 @@ class DuckMailProvider(BaseMailProvider):
 
     def _request(self, method: str, path: str, token: str = "", use_api_key: bool = False, params: dict | None = None, payload: dict | None = None, expected: tuple[int, ...] = (200, 201, 204)):
         headers = {"Authorization": f"Bearer {self.api_key if use_api_key else token}"} if use_api_key or token else {}
-        resp = self.session.request(method.upper(), f"https://api.duckmail.sbs{path}", headers=headers, params=params, json=payload, timeout=self.conf["request_timeout"], verify=False)
+        resp = _mail_api_request(self.session, method, f"https://api.duckmail.sbs{path}", headers=headers, params=params, json=payload, timeout=self.conf["request_timeout"], verify=False)
         if resp.status_code not in expected:
             raise RuntimeError(f"DuckMail 请求失败: {method} {path}, HTTP {resp.status_code}, body={resp.text[:300]}")
         return {} if resp.status_code == 204 else resp.json()
@@ -912,7 +941,7 @@ class GptMailProvider(BaseMailProvider):
 
     def _request(self, method: str, path: str, params: dict | None = None, payload: dict | None = None):
         query = dict(params or {})
-        resp = self.session.request(method.upper(), f"https://mail.chatgpt.org.uk{path}", params=query, json=payload, timeout=self.conf["request_timeout"], verify=False)
+        resp = _mail_api_request(self.session, method, f"https://mail.chatgpt.org.uk{path}", params=query, json=payload, timeout=self.conf["request_timeout"], verify=False)
         if resp.status_code != 200:
             raise RuntimeError(f"GPTMail 请求失败: {method} {path}, HTTP {resp.status_code}, body={resp.text[:300]}")
         data = resp.json()
@@ -953,7 +982,7 @@ class MoEmailProvider(BaseMailProvider):
         self.session = _create_session(conf)
 
     def _request(self, method: str, path: str, params: dict | None = None, payload: dict | None = None, expected: tuple[int, ...] = (200,)):
-        resp = self.session.request(method.upper(), f"{self.api_base}{path}", headers={"X-API-Key": self.api_key, "Content-Type": "application/json", "User-Agent": self.conf["user_agent"]}, params=params, json=payload, timeout=self.conf["request_timeout"], verify=False)
+        resp = _mail_api_request(self.session, method, f"{self.api_base}{path}", headers={"X-API-Key": self.api_key, "Content-Type": "application/json", "User-Agent": self.conf["user_agent"]}, params=params, json=payload, timeout=self.conf["request_timeout"], verify=False)
         if resp.status_code not in expected:
             raise RuntimeError(f"MoEmail 请求失败: {method} {path}, HTTP {resp.status_code}, body={resp.text[:300]}")
         data = resp.json()
@@ -1011,7 +1040,8 @@ class InbucketMailProvider(BaseMailProvider):
         })
 
     def _request(self, method: str, path: str, expected: tuple[int, ...] = (200,)):
-        resp = self.session.request(
+        resp = _mail_api_request(
+            self.session,
             method.upper(),
             f"{self.api_base}{path}",
             timeout=self.conf["request_timeout"],
@@ -1113,7 +1143,7 @@ class YydsMailProvider(BaseMailProvider):
 
     def _request(self, method: str, path: str, token: str = "", params: dict | None = None, payload: dict | None = None, expected: tuple[int, ...] = (200, 201, 204)):
         headers = {"Authorization": f"Bearer {token}"} if token else {"X-API-Key": self.api_key}
-        resp = self.session.request(method.upper(), f"{self.api_base}{path}", headers=headers, params=params, json=payload, timeout=self.conf["request_timeout"], verify=False)
+        resp = _mail_api_request(self.session, method, f"{self.api_base}{path}", headers=headers, params=params, json=payload, timeout=self.conf["request_timeout"], verify=False)
         if resp.status_code not in expected:
             raise RuntimeError(f"YYDSMail 请求失败: {method} {path}, HTTP {resp.status_code}, body={resp.text[:300]}")
         if resp.status_code == 204:
@@ -1258,7 +1288,9 @@ class OutlookTokenProvider(BaseMailProvider):
         self.session.close()
 
     def _exchange_refresh_token(self, client_id: str, refresh_token: str, scope: str) -> str:
-        resp = self.session.post(
+        resp = _mail_api_request(
+            self.session,
+            "POST",
             OUTLOOK_TOKEN_URL,
             data={"client_id": client_id, "grant_type": "refresh_token", "refresh_token": refresh_token, "scope": scope},
             headers={"Content-Type": "application/x-www-form-urlencoded", "User-Agent": self.conf["user_agent"]},
@@ -1310,7 +1342,9 @@ class OutlookTokenProvider(BaseMailProvider):
         }
 
     def _read_graph(self, access_token: str) -> list[dict[str, Any]]:
-        resp = self.session.get(
+        resp = _mail_api_request(
+            self.session,
+            "GET",
             OUTLOOK_GRAPH_MESSAGES_URL,
             headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json", "User-Agent": self.conf["user_agent"]},
             params={"$top": self.message_limit, "$orderby": "receivedDateTime desc", "$select": "subject,receivedDateTime,from,body,bodyPreview"},

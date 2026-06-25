@@ -3,6 +3,37 @@ import pytest
 from services.register import domain_reputation, mail_provider, openai_register
 
 
+def test_mail_api_429_cools_down_then_retries(monkeypatch):
+    calls = []
+    sleeps = []
+    now = [100.0]
+
+    class FakeResponse:
+        def __init__(self, status_code):
+            self.status_code = status_code
+
+    class FakeSession:
+        def request(self, method, url, **kwargs):
+            calls.append((method, url, kwargs))
+            return FakeResponse(429 if len(calls) == 1 else 200)
+
+    monkeypatch.setattr(mail_provider, "mail_api_cooldown_until", 0.0)
+    monkeypatch.setattr(mail_provider.time, "monotonic", lambda: now[0])
+
+    def fake_sleep(seconds):
+        sleeps.append(seconds)
+        now[0] += seconds
+
+    monkeypatch.setattr(mail_provider.time, "sleep", fake_sleep)
+
+    response = mail_provider._mail_api_request(FakeSession(), "get", "https://mail.example.test/api", timeout=1)
+
+    assert response.status_code == 200
+    assert sleeps == [30]
+    assert [call[0] for call in calls] == ["GET", "GET"]
+    assert calls[0][1:] == calls[1][1:]
+
+
 def test_yyds_non_learning_filters_disabled_domains(monkeypatch, tmp_path):
     store = domain_reputation.DomainReputationStore(tmp_path / "mail_domain_reputation.json")
     monkeypatch.setattr(domain_reputation, "store", store)
