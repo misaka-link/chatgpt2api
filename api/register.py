@@ -27,6 +27,10 @@ class OutlookPoolResetRequest(BaseModel):
     scope: str | None = None
 
 
+class OutlookPoolResetRequest(BaseModel):
+    scope: str | None = None
+
+
 def create_router() -> APIRouter:
     router = APIRouter()
 

@@ -2,7 +2,9 @@
 
 ## Unreleased
 
-+ [新增] 合入上游 `4fa120b`：调试页支持图片输入，Chat Completions / Responses 支持透传 `reasoning_effort`、`thinking_effort` 和 `reasoning.effort`。
++ [修复] 修复sub2api导入问题。
++ [修复] 修复前端404、405问题。
++ [新增] 新增出图后删除对话记录功能。
 
 ## 1.5.0 - 2026-06-13
 
