@@ -209,6 +209,15 @@ class RegisterService:
         domain_reputation.store.delete_blacklisted_domain(target_provider, domain)
         return self.get_reputation(target_provider, target_provider_ref)
 
+    def clear_reputation_blacklisted_domains(self, provider: str, provider_ref: str) -> dict:
+        target_provider = str(provider or "").strip() or "unknown"
+        target_provider_ref = str(provider_ref or "").strip()
+        cleared = domain_reputation.store.clear_blacklisted_domains(target_provider)
+        return {
+            "cleared": cleared,
+            "reputation": self.get_reputation(target_provider, target_provider_ref),
+        }
+
     def upsert_reputation_domain(self, provider: str, provider_ref: str, domain: str, previous_domain: str = "") -> dict:
         target_provider = str(provider or "").strip() or "unknown"
         target_provider_ref = str(provider_ref or "").strip()
@@ -220,6 +229,15 @@ class RegisterService:
         target_provider_ref = str(provider_ref or "").strip()
         domain_reputation.store.delete_domain(target_provider, domain)
         return self.get_reputation(target_provider, target_provider_ref)
+
+    def clear_reputation_trusted_domains(self, provider: str, provider_ref: str) -> dict:
+        target_provider = str(provider or "").strip() or "unknown"
+        target_provider_ref = str(provider_ref or "").strip()
+        cleared = domain_reputation.store.clear_trusted_domains(target_provider)
+        return {
+            "cleared": cleared,
+            "reputation": self.get_reputation(target_provider, target_provider_ref),
+        }
 
     def start(self) -> dict:
         with self._lock:

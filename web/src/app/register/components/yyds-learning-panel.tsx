@@ -14,16 +14,10 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
 import {
+  clearRegisterReputationBlacklistedDomains,
+  clearRegisterReputationDomains,
   deleteRegisterReputationBlacklistedDomain,
   deleteRegisterReputationDomain,
   fetchRegisterReputation,
@@ -59,6 +53,9 @@ const EMPTY_DOMAIN_DIALOG: DomainDialogState = {
   previousDomain: "",
   domain: "",
 };
+
+const CLEAR_BLACKLIST_PENDING_KEY = "__clear-blacklisted-domains__";
+const CLEAR_TRUSTED_PENDING_KEY = "__clear-trusted-domains__";
 
 function formatTime(value: string) {
   if (!value) return "-";
@@ -183,11 +180,13 @@ function DomainDialog({
 function BlacklistRows({
   items,
   pendingKey,
+  disabled,
   onEdit,
   onDelete,
 }: {
   items: RegisterReputationBlacklistedDomain[];
   pendingKey: string;
+  disabled: boolean;
   onEdit: (item: RegisterReputationBlacklistedDomain) => void;
   onDelete: (item: RegisterReputationBlacklistedDomain) => void;
 }) {
@@ -195,41 +194,31 @@ function BlacklistRows({
     return <div className="rounded-xl border border-dashed border-stone-200 bg-white px-4 py-6 text-sm text-stone-500">当前没有黑名单域名。</div>;
   }
   return (
-    <div className="overflow-hidden rounded-xl border border-stone-200 bg-white">
-      <Table>
-        <TableHeader>
-          <TableRow className="hover:bg-transparent">
-            <TableHead>域名</TableHead>
-            <TableHead>原因</TableHead>
-            <TableHead>更新时间</TableHead>
-            <TableHead className="w-[120px]">操作</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {items.map((item) => {
-            const disabled = pendingKey === item.domain;
-            return (
-              <TableRow key={item.domain}>
-                <TableCell className="font-mono text-xs text-stone-700">{item.domain}</TableCell>
-                <TableCell className="max-w-[240px] break-words text-xs text-stone-600">{item.reason || "-"}</TableCell>
-                <TableCell className="text-xs text-stone-500">{formatTime(item.updated_at)}</TableCell>
-                <TableCell>
-                  <div className="flex items-center gap-2">
-                    <Button type="button" variant="outline" className="h-8 rounded-lg px-2 text-xs" onClick={() => onEdit(item)} disabled={disabled}>
-                      <Pencil className="size-3.5" />
-                      编辑
-                    </Button>
-                    <Button type="button" variant="outline" className="h-8 rounded-lg border-rose-200 px-2 text-xs text-rose-600 hover:bg-rose-50" onClick={() => onDelete(item)} disabled={disabled}>
-                      <Trash2 className="size-3.5" />
-                      删除
-                    </Button>
-                  </div>
-                </TableCell>
-              </TableRow>
-            );
-          })}
-        </TableBody>
-      </Table>
+    <div className="max-h-[26rem] space-y-2 overflow-y-auto pr-1">
+      {items.map((item) => {
+        const rowDisabled = disabled || pendingKey === item.domain;
+        return (
+          <div key={item.domain} className="rounded-xl border border-stone-200 bg-white p-3">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div className="min-w-0 space-y-2">
+                <div className="font-mono text-xs text-stone-700 break-all">{item.domain}</div>
+                <div className="text-xs text-stone-600 break-words">{item.reason || "-"}</div>
+                <div className="text-[11px] text-stone-500">更新时间：{formatTime(item.updated_at)}</div>
+              </div>
+              <div className="flex w-full shrink-0 flex-wrap items-center gap-2 sm:w-auto sm:justify-end">
+                <Button type="button" variant="outline" className="h-8 flex-1 rounded-lg px-2 text-xs sm:flex-none" onClick={() => onEdit(item)} disabled={rowDisabled}>
+                  <Pencil className="size-3.5" />
+                  编辑
+                </Button>
+                <Button type="button" variant="outline" className="h-8 flex-1 rounded-lg border-rose-200 px-2 text-xs text-rose-600 hover:bg-rose-50 sm:flex-none" onClick={() => onDelete(item)} disabled={rowDisabled}>
+                  <Trash2 className="size-3.5" />
+                  删除
+                </Button>
+              </div>
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -237,11 +226,13 @@ function BlacklistRows({
 function DomainRows({
   items,
   pendingKey,
+  disabled,
   onEdit,
   onDelete,
 }: {
   items: RegisterReputationDomain[];
   pendingKey: string;
+  disabled: boolean;
   onEdit: (item: RegisterReputationDomain) => void;
   onDelete: (item: RegisterReputationDomain) => void;
 }) {
@@ -249,49 +240,38 @@ function DomainRows({
     return <div className="rounded-xl border border-dashed border-stone-200 bg-white px-4 py-6 text-sm text-stone-500">当前没有信任域名。</div>;
   }
   return (
-    <div className="overflow-hidden rounded-xl border border-stone-200 bg-white">
-      <Table>
-        <TableHeader>
-          <TableRow className="hover:bg-transparent">
-            <TableHead>域名</TableHead>
-            <TableHead>状态</TableHead>
-            <TableHead>统计</TableHead>
-            <TableHead>最近成功</TableHead>
-            <TableHead className="w-[120px]">操作</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {items.map((item) => {
-            const disabled = pendingKey === item.domain;
-            return (
-              <TableRow key={item.domain}>
-                <TableCell className="font-mono text-xs text-stone-700">{item.domain}</TableCell>
-                <TableCell>
+    <div className="max-h-[26rem] space-y-2 overflow-y-auto pr-1">
+      {items.map((item) => {
+        const rowDisabled = disabled || pendingKey === item.domain;
+        return (
+          <div key={item.domain} className="rounded-xl border border-stone-200 bg-white p-3">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div className="min-w-0 space-y-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-mono text-xs text-stone-700 break-all">{item.domain}</span>
                   <Badge variant={item.healthy ? "success" : "secondary"} className="rounded-md">
                     {item.healthy ? "健康" : "降级"}
                   </Badge>
-                </TableCell>
-                <TableCell className="text-xs text-stone-600">
+                </div>
+                <div className="text-xs text-stone-600">
                   成功 {item.success} / 硬失败 {item.hard_fail} / 软失败 {item.soft_fail}
-                </TableCell>
-                <TableCell className="text-xs text-stone-500">{formatTime(item.last_success_at)}</TableCell>
-                <TableCell>
-                  <div className="flex items-center gap-2">
-                    <Button type="button" variant="outline" className="h-8 rounded-lg px-2 text-xs" onClick={() => onEdit(item)} disabled={disabled}>
-                      <Pencil className="size-3.5" />
-                      编辑
-                    </Button>
-                    <Button type="button" variant="outline" className="h-8 rounded-lg border-rose-200 px-2 text-xs text-rose-600 hover:bg-rose-50" onClick={() => onDelete(item)} disabled={disabled}>
-                      <Trash2 className="size-3.5" />
-                      删除
-                    </Button>
-                  </div>
-                </TableCell>
-              </TableRow>
-            );
-          })}
-        </TableBody>
-      </Table>
+                </div>
+                <div className="text-[11px] text-stone-500">最近成功：{formatTime(item.last_success_at)}</div>
+              </div>
+              <div className="flex w-full shrink-0 flex-wrap items-center gap-2 sm:w-auto sm:justify-end">
+                <Button type="button" variant="outline" className="h-8 flex-1 rounded-lg px-2 text-xs sm:flex-none" onClick={() => onEdit(item)} disabled={rowDisabled}>
+                  <Pencil className="size-3.5" />
+                  编辑
+                </Button>
+                <Button type="button" variant="outline" className="h-8 flex-1 rounded-lg border-rose-200 px-2 text-xs text-rose-600 hover:bg-rose-50 sm:flex-none" onClick={() => onDelete(item)} disabled={rowDisabled}>
+                  <Trash2 className="size-3.5" />
+                  删除
+                </Button>
+              </div>
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -392,6 +372,28 @@ export function YydsLearningPanel({
     }
   };
 
+  const clearBlacklistedDomains = async () => {
+    if (!blacklistedItems.length) {
+      return;
+    }
+    if (!window.confirm(`确定清空全部 ${blacklistedItems.length} 个黑名单域名吗？`)) {
+      return;
+    }
+    setPendingKey(CLEAR_BLACKLIST_PENDING_KEY);
+    try {
+      const data = await clearRegisterReputationBlacklistedDomains({
+        provider,
+        provider_ref: providerRef,
+      });
+      setReputation(data.reputation);
+      toast.success(data.cleared > 0 ? `已清空 ${data.cleared} 个黑名单域名` : "当前没有黑名单域名");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "清空黑名单域名失败");
+    } finally {
+      setPendingKey("");
+    }
+  };
+
   const saveDomain = async () => {
     const domain = domainDialog.domain.trim();
     if (!domain) {
@@ -440,9 +442,31 @@ export function YydsLearningPanel({
   const domainItems = reputation?.trusted_domains || [];
   const dialogPending = pendingKey !== "";
 
+  const clearDomains = async () => {
+    if (!domainItems.length) {
+      return;
+    }
+    if (!window.confirm(`确定清空全部 ${domainItems.length} 个信任域名吗？`)) {
+      return;
+    }
+    setPendingKey(CLEAR_TRUSTED_PENDING_KEY);
+    try {
+      const data = await clearRegisterReputationDomains({
+        provider,
+        provider_ref: providerRef,
+      });
+      setReputation(data.reputation);
+      toast.success(data.cleared > 0 ? `已清空 ${data.cleared} 个信任域名` : "当前没有信任域名");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "清空信任域名失败");
+    } finally {
+      setPendingKey("");
+    }
+  };
+
   return (
     <div className="space-y-4 rounded-2xl border border-stone-200 bg-stone-50/70 p-4">
-      <div className="flex items-start justify-between gap-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="space-y-1">
           <div className="flex items-center gap-2 text-sm font-semibold text-stone-800">
             <ShieldCheck className="size-4 text-emerald-600" />
@@ -452,7 +476,7 @@ export function YydsLearningPanel({
             黑名单和信任列表都按域名统计。输入完整邮箱时会自动提取域名部分，修改后立即生效，不需要再点上面的“保存配置”。
           </p>
         </div>
-        <Button type="button" variant="outline" className="h-8 rounded-lg px-3 text-xs" onClick={() => void handleReload()} disabled={isLoading}>
+        <Button type="button" variant="outline" className="h-8 rounded-lg px-3 text-xs" onClick={() => void handleReload()} disabled={isLoading || dialogPending}>
           {isLoading ? <LoaderCircle className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
           刷新
         </Button>
@@ -463,21 +487,28 @@ export function YydsLearningPanel({
           <LoaderCircle className="size-5 animate-spin text-stone-400" />
         </div>
       ) : (
-        <div className="grid gap-4 xl:grid-cols-2">
+        <div className="space-y-4">
           <div className="space-y-3">
-            <div className="flex items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center gap-2">
                 <h4 className="text-sm font-semibold text-stone-800">黑名单域名</h4>
                 <Badge variant="secondary" className="rounded-md">{blacklistedItems.length}</Badge>
               </div>
-              <Button type="button" variant="outline" className="h-8 rounded-lg px-3 text-xs" onClick={() => setBlacklistDialog({ ...EMPTY_BLACKLIST_DIALOG, open: true })} disabled={dialogPending}>
-                <Plus className="size-3.5" />
-                新增
-              </Button>
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                <Button type="button" variant="outline" className="h-8 rounded-lg border-rose-200 px-3 text-xs text-rose-600 hover:bg-rose-50" onClick={() => void clearBlacklistedDomains()} disabled={dialogPending || !blacklistedItems.length}>
+                  <Trash2 className="size-3.5" />
+                  清空全部
+                </Button>
+                <Button type="button" variant="outline" className="h-8 rounded-lg px-3 text-xs" onClick={() => setBlacklistDialog({ ...EMPTY_BLACKLIST_DIALOG, open: true })} disabled={dialogPending}>
+                  <Plus className="size-3.5" />
+                  新增
+                </Button>
+              </div>
             </div>
             <BlacklistRows
               items={blacklistedItems}
               pendingKey={pendingKey}
+              disabled={dialogPending}
               onEdit={(item) =>
                 setBlacklistDialog({
                   open: true,
@@ -491,19 +522,26 @@ export function YydsLearningPanel({
           </div>
 
           <div className="space-y-3">
-            <div className="flex items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="flex items-center gap-2">
                 <h4 className="text-sm font-semibold text-stone-800">信任域名列表</h4>
                 <Badge variant="secondary" className="rounded-md">{domainItems.length}</Badge>
               </div>
-              <Button type="button" variant="outline" className="h-8 rounded-lg px-3 text-xs" onClick={() => setDomainDialog({ ...EMPTY_DOMAIN_DIALOG, open: true })} disabled={dialogPending}>
-                <Plus className="size-3.5" />
-                新增
-              </Button>
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                <Button type="button" variant="outline" className="h-8 rounded-lg border-rose-200 px-3 text-xs text-rose-600 hover:bg-rose-50" onClick={() => void clearDomains()} disabled={dialogPending || !domainItems.length}>
+                  <Trash2 className="size-3.5" />
+                  清空全部
+                </Button>
+                <Button type="button" variant="outline" className="h-8 rounded-lg px-3 text-xs" onClick={() => setDomainDialog({ ...EMPTY_DOMAIN_DIALOG, open: true })} disabled={dialogPending}>
+                  <Plus className="size-3.5" />
+                  新增
+                </Button>
+              </div>
             </div>
             <DomainRows
               items={domainItems}
               pendingKey={pendingKey}
+              disabled={dialogPending}
               onEdit={(item) => setDomainDialog({ open: true, previousDomain: item.domain, domain: item.domain })}
               onDelete={(item) => void deleteDomain(item)}
             />

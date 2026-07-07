@@ -90,6 +90,10 @@ class FakeRegisterService:
             raise ValueError("域名不能为空")
         return self.get_reputation(provider, provider_ref)
 
+    def clear_reputation_blacklisted_domains(self, provider: str, provider_ref: str) -> dict:
+        self.calls.append(("clear_blacklisted_domains", provider, provider_ref))
+        return {"cleared": 2, "reputation": self.get_reputation(provider, provider_ref)}
+
     def upsert_reputation_domain(self, provider: str, provider_ref: str, domain: str, previous_domain: str = "") -> dict:
         self.calls.append(("upsert_domain", provider, provider_ref, domain, previous_domain))
         if "." not in domain:
@@ -101,6 +105,10 @@ class FakeRegisterService:
         if "." not in domain:
             raise ValueError("域名不能为空")
         return self.get_reputation(provider, provider_ref)
+
+    def clear_reputation_trusted_domains(self, provider: str, provider_ref: str) -> dict:
+        self.calls.append(("clear_trusted_domains", provider, provider_ref))
+        return {"cleared": 3, "reputation": self.get_reputation(provider, provider_ref)}
 
 
 class RegisterApiTests(unittest.TestCase):
@@ -174,6 +182,34 @@ class RegisterApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200, response.text)
         self.assertIn(("delete_blacklisted_domain", "yyds_mail", "yyds_mail#1", "bad.test"), self.fake_service.calls)
+
+    def test_blacklisted_domain_clear_routes_to_service(self) -> None:
+        response = self.client.post(
+            "/api/register/reputation/blacklisted-domains/clear",
+            headers=AUTH_HEADERS,
+            json={
+                "provider": "yyds_mail",
+                "provider_ref": "yyds_mail#1",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["cleared"], 2)
+        self.assertIn(("clear_blacklisted_domains", "yyds_mail", "yyds_mail#1"), self.fake_service.calls)
+
+    def test_trusted_domain_clear_routes_to_service(self) -> None:
+        response = self.client.post(
+            "/api/register/reputation/trusted-domains/clear",
+            headers=AUTH_HEADERS,
+            json={
+                "provider": "yyds_mail",
+                "provider_ref": "yyds_mail#1",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["cleared"], 3)
+        self.assertIn(("clear_trusted_domains", "yyds_mail", "yyds_mail#1"), self.fake_service.calls)
 
 
 if __name__ == "__main__":

@@ -54,6 +54,11 @@ class RegisterReputationTrustedDomainDeleteRequest(BaseModel):
     domain: str
 
 
+class RegisterReputationProviderRequest(BaseModel):
+    provider: str
+    provider_ref: str | None = None
+
+
 def create_router() -> APIRouter:
     router = APIRouter()
 
@@ -116,6 +121,11 @@ def create_router() -> APIRouter:
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
 
+    @router.post("/api/register/reputation/blacklisted-domains/clear")
+    async def clear_register_reputation_blacklisted_domains(body: RegisterReputationProviderRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return register_service.clear_reputation_blacklisted_domains(body.provider, body.provider_ref or "")
+
     @router.post("/api/register/reputation/trusted-domains")
     async def upsert_register_reputation_domain(body: RegisterReputationTrustedDomainRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
@@ -131,6 +141,11 @@ def create_router() -> APIRouter:
             return {"reputation": register_service.delete_reputation_domain(body.provider, body.provider_ref or "", body.domain)}
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @router.post("/api/register/reputation/trusted-domains/clear")
+    async def clear_register_reputation_trusted_domains(body: RegisterReputationProviderRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return register_service.clear_reputation_trusted_domains(body.provider, body.provider_ref or "")
 
     @router.get("/api/register/events")
     async def register_events(token: str = ""):

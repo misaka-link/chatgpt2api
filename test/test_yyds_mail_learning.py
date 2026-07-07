@@ -332,6 +332,22 @@ def test_yyds_reputation_manual_domain_crud_resets_failures(monkeypatch, tmp_pat
     assert store.list_trusted_domains("yyds_mail") == []
 
 
+def test_yyds_reputation_clear_all_actions_only_remove_visible_sections(monkeypatch, tmp_path):
+    store = domain_reputation.DomainReputationStore(tmp_path / "mail_domain_reputation.json")
+    monkeypatch.setattr(domain_reputation, "store", store)
+
+    store.upsert_blacklisted_domain("yyds_mail", "blocked.test", "manual-block")
+    store.upsert_trusted_domain("yyds_mail", "good.test")
+    store.record_failure("yyds_mail", "soft.test", "YYDSMail 请求异常")
+
+    assert store.clear_blacklisted_domains("yyds_mail") == 1
+    assert store.list_blacklisted_domains("yyds_mail") == []
+
+    assert store.clear_trusted_domains("yyds_mail") == 1
+    assert store.list_trusted_domains("yyds_mail") == []
+    assert store.usable_domains("yyds_mail", ["soft.test"]) == ["soft.test"]
+
+
 def test_yyds_reputation_migrates_legacy_mailbox_blacklist(monkeypatch, tmp_path):
     file_path = tmp_path / "mail_domain_reputation.json"
     file_path.write_text(

@@ -848,6 +848,16 @@ export async function deleteRegisterReputationBlacklistedDomain(payload: {
   });
 }
 
+export async function clearRegisterReputationBlacklistedDomains(payload: {
+  provider: string;
+  provider_ref: string;
+}) {
+  return httpRequest<{ reputation: RegisterReputation; cleared: number }>("/api/register/reputation/blacklisted-domains/clear", {
+    method: "POST",
+    body: payload,
+  });
+}
+
 export async function upsertRegisterReputationDomain(payload: {
   provider: string;
   provider_ref: string;
@@ -866,6 +876,16 @@ export async function deleteRegisterReputationDomain(payload: {
   domain: string;
 }) {
   return httpRequest<{ reputation: RegisterReputation }>("/api/register/reputation/trusted-domains/delete", {
+    method: "POST",
+    body: payload,
+  });
+}
+
+export async function clearRegisterReputationDomains(payload: {
+  provider: string;
+  provider_ref: string;
+}) {
+  return httpRequest<{ reputation: RegisterReputation; cleared: number }>("/api/register/reputation/trusted-domains/clear", {
     method: "POST",
     body: payload,
   });

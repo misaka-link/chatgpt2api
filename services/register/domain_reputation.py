@@ -358,6 +358,20 @@ class DomainReputationStore:
             self._save_locked(data)
             return removed is not None
 
+    def clear_blacklisted_domains(self, provider: str) -> int:
+        with self._lock:
+            data = self._load_locked()
+            provider_data = (((data.get("providers") or {}).get(_provider_root(provider))) or {})
+            domains = provider_data.get("domains")
+            if not isinstance(domains, dict):
+                return 0
+            removed = [domain for domain, record in domains.items() if isinstance(record, dict) and bool(record.get("disabled"))]
+            for domain in removed:
+                domains.pop(domain, None)
+            if removed:
+                self._save_locked(data)
+            return len(removed)
+
     def list_trusted_domains(self, provider: str) -> list[dict[str, Any]]:
         with self._lock:
             data = self._load_locked()
@@ -403,6 +417,24 @@ class DomainReputationStore:
             removed = domains.pop(normalized, None)
             self._save_locked(data)
             return removed is not None
+
+    def clear_trusted_domains(self, provider: str) -> int:
+        with self._lock:
+            data = self._load_locked()
+            provider_data = (((data.get("providers") or {}).get(_provider_root(provider))) or {})
+            domains = provider_data.get("domains")
+            if not isinstance(domains, dict):
+                return 0
+            removed = [
+                domain
+                for domain, record in domains.items()
+                if isinstance(record, dict) and not bool(record.get("disabled")) and int(record.get("success") or 0) > 0
+            ]
+            for domain in removed:
+                domains.pop(domain, None)
+            if removed:
+                self._save_locked(data)
+            return len(removed)
 
 
 store = DomainReputationStore()
