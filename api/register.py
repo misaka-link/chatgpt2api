@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 
-from fastapi import APIRouter, Header
+from fastapi import APIRouter, Header, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -27,8 +27,31 @@ class OutlookPoolResetRequest(BaseModel):
     scope: str | None = None
 
 
-class OutlookPoolResetRequest(BaseModel):
-    scope: str | None = None
+class RegisterReputationBlacklistedDomainRequest(BaseModel):
+    provider: str
+    provider_ref: str | None = None
+    domain: str
+    reason: str | None = None
+    previous_domain: str | None = None
+
+
+class RegisterReputationBlacklistedDomainDeleteRequest(BaseModel):
+    provider: str
+    provider_ref: str | None = None
+    domain: str
+
+
+class RegisterReputationTrustedDomainRequest(BaseModel):
+    provider: str
+    provider_ref: str | None = None
+    domain: str
+    previous_domain: str | None = None
+
+
+class RegisterReputationTrustedDomainDeleteRequest(BaseModel):
+    provider: str
+    provider_ref: str | None = None
+    domain: str
 
 
 def create_router() -> APIRouter:
@@ -63,6 +86,51 @@ def create_router() -> APIRouter:
     async def reset_outlook_pool(body: OutlookPoolResetRequest, authorization: str | None = Header(default=None)):
         require_admin(authorization)
         return {"register": register_service.reset_outlook_pool(body.scope or "all")}
+
+    @router.get("/api/register/reputation")
+    async def get_register_reputation(provider: str = "", provider_ref: str = "", authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        return {"reputation": register_service.get_reputation(provider, provider_ref)}
+
+    @router.post("/api/register/reputation/blacklisted-domains")
+    async def upsert_register_reputation_blacklisted_domain(body: RegisterReputationBlacklistedDomainRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        try:
+            return {
+                "reputation": register_service.upsert_reputation_blacklisted_domain(
+                    body.provider,
+                    body.provider_ref or "",
+                    body.domain,
+                    body.reason or "",
+                    body.previous_domain or "",
+                )
+            }
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @router.post("/api/register/reputation/blacklisted-domains/delete")
+    async def delete_register_reputation_blacklisted_domain(body: RegisterReputationBlacklistedDomainDeleteRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        try:
+            return {"reputation": register_service.delete_reputation_blacklisted_domain(body.provider, body.provider_ref or "", body.domain)}
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @router.post("/api/register/reputation/trusted-domains")
+    async def upsert_register_reputation_domain(body: RegisterReputationTrustedDomainRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        try:
+            return {"reputation": register_service.upsert_reputation_domain(body.provider, body.provider_ref or "", body.domain, body.previous_domain or "")}
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+    @router.post("/api/register/reputation/trusted-domains/delete")
+    async def delete_register_reputation_domain(body: RegisterReputationTrustedDomainDeleteRequest, authorization: str | None = Header(default=None)):
+        require_admin(authorization)
+        try:
+            return {"reputation": register_service.delete_reputation_domain(body.provider, body.provider_ref or "", body.domain)}
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
 
     @router.get("/api/register/events")
     async def register_events(token: str = ""):

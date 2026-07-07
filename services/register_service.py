@@ -10,7 +10,7 @@ from pathlib import Path
 
 from services.account_service import account_service
 from services.config import DATA_DIR
-from services.register import mail_provider, openai_register
+from services.register import domain_reputation, mail_provider, openai_register
 
 
 REGISTER_FILE = DATA_DIR / "register.json"
@@ -68,6 +68,8 @@ def _normalize(raw: dict) -> dict:
     mail = cfg.get("mail") if isinstance(cfg.get("mail"), dict) else {}
     cfg["mail"] = {**default_mail, **mail}
     cfg["mail"]["api_use_register_proxy"] = _safe_bool(cfg["mail"].get("api_use_register_proxy"), True)
+    providers = cfg["mail"].get("providers")
+    cfg["mail"]["providers"] = mail_provider.ensure_provider_refs(providers if isinstance(providers, list) else [])
     cfg["mail"].pop("proxy", None)
     cfg["enabled"] = bool(cfg.get("enabled"))
     stats = {**_default_config()["stats"], **(raw.get("stats") if isinstance(raw.get("stats"), dict) else {}),
@@ -184,6 +186,40 @@ class RegisterService:
             openai_register.config.update({k: self._config[k] for k in ("mail", "proxy", "total", "threads")})
             self._save()
             return self.get()
+
+    def get_reputation(self, provider: str, provider_ref: str = "") -> dict:
+        target_provider = str(provider or "").strip() or "unknown"
+        target_provider_ref = str(provider_ref or "").strip()
+        return {
+            "provider": target_provider,
+            "provider_ref": target_provider_ref,
+            "blacklisted_domains": domain_reputation.store.list_blacklisted_domains(target_provider),
+            "trusted_domains": domain_reputation.store.list_trusted_domains(target_provider),
+        }
+
+    def upsert_reputation_blacklisted_domain(self, provider: str, provider_ref: str, domain: str, reason: str = "", previous_domain: str = "") -> dict:
+        target_provider = str(provider or "").strip() or "unknown"
+        target_provider_ref = str(provider_ref or "").strip()
+        domain_reputation.store.upsert_blacklisted_domain(target_provider, domain, reason=reason, previous_domain=previous_domain)
+        return self.get_reputation(target_provider, target_provider_ref)
+
+    def delete_reputation_blacklisted_domain(self, provider: str, provider_ref: str, domain: str) -> dict:
+        target_provider = str(provider or "").strip() or "unknown"
+        target_provider_ref = str(provider_ref or "").strip()
+        domain_reputation.store.delete_blacklisted_domain(target_provider, domain)
+        return self.get_reputation(target_provider, target_provider_ref)
+
+    def upsert_reputation_domain(self, provider: str, provider_ref: str, domain: str, previous_domain: str = "") -> dict:
+        target_provider = str(provider or "").strip() or "unknown"
+        target_provider_ref = str(provider_ref or "").strip()
+        domain_reputation.store.upsert_trusted_domain(target_provider, domain, previous_domain=previous_domain)
+        return self.get_reputation(target_provider, target_provider_ref)
+
+    def delete_reputation_domain(self, provider: str, provider_ref: str, domain: str) -> dict:
+        target_provider = str(provider or "").strip() or "unknown"
+        target_provider_ref = str(provider_ref or "").strip()
+        domain_reputation.store.delete_domain(target_provider, domain)
+        return self.get_reputation(target_provider, target_provider_ref)
 
     def start(self) -> dict:
         with self._lock:

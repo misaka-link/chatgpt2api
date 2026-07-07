@@ -371,6 +371,43 @@ export type RegisterConfig = {
   }>;
 };
 
+export type RegisterReputationBlacklistedDomain = {
+  domain: string;
+  reason: string;
+  updated_at: string;
+  success: number;
+  hard_fail: number;
+  soft_fail: number;
+  consecutive_fail: number;
+  disabled: boolean;
+  healthy: boolean;
+  score: number;
+  last_success_at: string;
+  last_failure_at: string;
+  last_failure_reason: string;
+};
+
+export type RegisterReputationDomain = {
+  domain: string;
+  success: number;
+  hard_fail: number;
+  soft_fail: number;
+  consecutive_fail: number;
+  disabled: boolean;
+  healthy: boolean;
+  score: number;
+  last_success_at: string;
+  last_failure_at: string;
+  last_failure_reason: string;
+};
+
+export type RegisterReputation = {
+  provider: string;
+  provider_ref: string;
+  blacklisted_domains: RegisterReputationBlacklistedDomain[];
+  trusted_domains: RegisterReputationDomain[];
+};
+
 export async function login(authKey: string) {
   const normalizedAuthKey = String(authKey || "").trim();
   return httpRequest<LoginResponse>("/auth/login", {
@@ -776,6 +813,61 @@ export async function resetOutlookPool(scope: "all" | "failed" | "unused" = "all
   return httpRequest<{ register: RegisterConfig }>("/api/register/outlook-pool/reset", {
     method: "POST",
     body: { scope },
+  });
+}
+
+export async function fetchRegisterReputation(provider: string, providerRef: string) {
+  const query = new URLSearchParams({
+    provider,
+    provider_ref: providerRef,
+  });
+  return httpRequest<{ reputation: RegisterReputation }>(`/api/register/reputation?${query.toString()}`);
+}
+
+export async function upsertRegisterReputationBlacklistedDomain(payload: {
+  provider: string;
+  provider_ref: string;
+  domain: string;
+  reason?: string;
+  previous_domain?: string;
+}) {
+  return httpRequest<{ reputation: RegisterReputation }>("/api/register/reputation/blacklisted-domains", {
+    method: "POST",
+    body: payload,
+  });
+}
+
+export async function deleteRegisterReputationBlacklistedDomain(payload: {
+  provider: string;
+  provider_ref: string;
+  domain: string;
+}) {
+  return httpRequest<{ reputation: RegisterReputation }>("/api/register/reputation/blacklisted-domains/delete", {
+    method: "POST",
+    body: payload,
+  });
+}
+
+export async function upsertRegisterReputationDomain(payload: {
+  provider: string;
+  provider_ref: string;
+  domain: string;
+  previous_domain?: string;
+}) {
+  return httpRequest<{ reputation: RegisterReputation }>("/api/register/reputation/trusted-domains", {
+    method: "POST",
+    body: payload,
+  });
+}
+
+export async function deleteRegisterReputationDomain(payload: {
+  provider: string;
+  provider_ref: string;
+  domain: string;
+}) {
+  return httpRequest<{ reputation: RegisterReputation }>("/api/register/reputation/trusted-domains/delete", {
+    method: "POST",
+    body: payload,
   });
 }
 

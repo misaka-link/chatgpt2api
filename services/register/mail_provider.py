@@ -599,29 +599,35 @@ class BaseMailProvider:
         pass
 
 
-def _provider_scope_from_mailbox(mailbox: dict[str, Any]) -> str:
-    return str(mailbox.get("provider_ref") or mailbox.get("provider") or "unknown").strip() or "unknown"
+def _provider_name_from_mailbox(mailbox: dict[str, Any]) -> str:
+    return str(mailbox.get("provider") or "unknown").strip() or "unknown"
 
 
 def _yyds_learning_enabled(mailbox: dict[str, Any]) -> bool:
     return str(mailbox.get("provider") or "") == YydsMailProvider.name and _bool(mailbox.get("learning_mode"), False)
 
 
-def _should_disable_yyds_mailbox(mailbox: dict[str, Any], error: Exception | str | None) -> bool:
+def _should_disable_yyds_domain(mailbox: dict[str, Any], error: Exception | str | None) -> bool:
     if not _yyds_learning_enabled(mailbox):
         return False
     reason = str(error or "")
     return any(marker in reason for marker in YYDS_LEARNING_MAILBOX_RETRY_MARKERS)
 
 
-def _disable_yyds_mailbox(mailbox: dict[str, Any], error: Exception | str | None) -> dict[str, Any]:
-    if not _should_disable_yyds_mailbox(mailbox, error):
-        return {"mailbox_disabled": False, "disabled_changed": False}
-    address = _normalize_mailbox_text(mailbox.get("address"))
-    if not address:
-        return {"mailbox_disabled": False, "disabled_changed": False}
-    result = domain_reputation.store.disable_mailbox(_provider_scope_from_mailbox(mailbox), address, str(error or ""))
-    return {"mailbox_disabled": True, "disabled_changed": bool(result.get("disabled_changed"))}
+def _disable_yyds_domain(mailbox: dict[str, Any], error: Exception | str | None) -> dict[str, Any]:
+    if not _should_disable_yyds_domain(mailbox, error):
+        return {"domain_disabled": False, "disabled_changed": False, "reputation_recorded": False, "domain": ""}
+    domain = _normalize_domain_text(mailbox.get("domain") or mailbox.get("address"))
+    if not domain:
+        return {"domain_disabled": False, "disabled_changed": False, "reputation_recorded": False, "domain": ""}
+    result = domain_reputation.store.record_failure(_provider_name_from_mailbox(mailbox), domain, str(error or ""))
+    return {
+        "domain_disabled": True,
+        "disabled_changed": bool(result.get("disabled_changed")),
+        "bucket": str(result.get("bucket") or ""),
+        "domain": domain,
+        "reputation_recorded": True,
+    }
 
 
 class CloudflareTempMailProvider(BaseMailProvider):
@@ -1315,9 +1321,6 @@ class YydsMailProvider(BaseMailProvider):
         self._available_domains_cache = (now, domains)
         return list(domains)
 
-    def _provider_scope(self) -> str:
-        return str(self.provider_ref or self.name).strip() or self.name
-
     def _select_domain(self, allow_empty: bool = False, seed_domains: list[str] | None = None, include_learned: bool = True) -> str:
         seed_domains = [str(item).strip() for item in (seed_domains or self.domain or self._fetch_available_domains()) if str(item).strip()]
         if not seed_domains:
@@ -1381,12 +1384,12 @@ class YydsMailProvider(BaseMailProvider):
             token = str(data.get("token") or data.get("temp_token") or data.get("tempToken") or data.get("access_token") or "").strip()
             if not address or not token:
                 raise RuntimeError("YYDSMail 缺少 address 或 token")
-            if self.learning_mode and domain_reputation.store.is_mailbox_disabled(self._provider_scope(), address):
-                last_disabled = address
+            domain = address.rsplit("@", 1)[-1].strip().lower() if "@" in address else str(payload.get("domain") or "").strip().lower()
+            if self.learning_mode and domain and domain_reputation.store.is_disabled(self.name, domain):
+                last_disabled = domain
                 if attempt + 1 < max_attempts:
                     continue
                 break
-            domain = address.rsplit("@", 1)[-1].strip().lower() if "@" in address else str(payload.get("domain") or "").strip().lower()
             return {
                 "provider": self.name,
                 "provider_ref": self.provider_ref,
@@ -1396,7 +1399,7 @@ class YydsMailProvider(BaseMailProvider):
                 "account_id": str(data.get("id") or ""),
                 "learning_mode": self.learning_mode,
             }
-        raise RuntimeError(f"YYDSMail 连续返回本地已禁用邮箱: {last_disabled or 'unknown'}")
+        raise RuntimeError(f"YYDSMail 连续返回本地已禁用域名: {last_disabled or 'unknown'}")
 
     def fetch_latest_message(self, mailbox: dict[str, Any]) -> dict[str, Any] | None:
         data = self._request("GET", "/messages", token=str(mailbox.get("token") or ""), params={"address": mailbox["address"]})
@@ -1729,15 +1732,35 @@ class OutlookTokenProvider(BaseMailProvider):
 
 
 def _entries(mail_config: dict) -> list[dict]:
+    providers = ensure_provider_refs(mail_config.get("providers") or [])
     result: list[dict] = []
     counters: dict[str, int] = {}
-    for item in mail_config["providers"]:
-        idx = len(result) + 1
+    for idx, item in enumerate(providers, start=1):
         t = item.get("type", "")
         cnt = counters.get(t, 0) + 1
         counters[t] = cnt
-        label = f"DDG-{cnt}" if t == "ddg_mail" else f"{t}#{idx}"
-        result.append({**item, "provider_ref": f"{item['type']}#{idx}", "label": label})
+        label = str(item.get("label") or (f"DDG-{cnt}" if t == "ddg_mail" else str(item.get("provider_ref") or f"{t}#{idx}")))
+        result.append({**item, "label": label})
+    return result
+
+
+def ensure_provider_refs(providers: list[dict]) -> list[dict]:
+    result: list[dict] = []
+    seen: set[str] = set()
+    for idx, item in enumerate(providers, start=1):
+        provider = dict(item or {})
+        current = str(provider.get("provider_ref") or "").strip()
+        type_name = str(provider.get("type") or "provider").strip() or "provider"
+        if not current or current in seen:
+            base = f"{type_name}#{idx}"
+            current = base
+            suffix = 2
+            while current in seen:
+                current = f"{base}-{suffix}"
+                suffix += 1
+        provider["provider_ref"] = current
+        seen.add(current)
+        result.append(provider)
     return result
 
 
@@ -1822,12 +1845,12 @@ def mark_mailbox_result(mailbox: dict, *, success: bool, error: Exception | str 
 
     outlook_token：成功标记 used；失败时若是 token 失效标记 token_invalid，
     其余失败标记 failed（保留邮箱占用以便排查，可通过重置释放）。
-    yyds_mail 学习模式：遇到明确的注册拒绝时，把邮箱地址标记为本地不可用，并提示上层换新邮箱重试。
+    yyds_mail 学习模式：遇到明确的注册拒绝时，把当前域名标记为本地不可用，并提示上层换新邮箱重试。
     """
-    tracked = {"retry_with_new_mailbox": False, "mailbox_disabled": False, "disabled_changed": False}
+    tracked = {"retry_with_new_mailbox": False, "domain_disabled": False, "disabled_changed": False, "reputation_recorded": False, "domain": ""}
     if not success:
-        tracked.update(_disable_yyds_mailbox(mailbox, error))
-        tracked["retry_with_new_mailbox"] = tracked["mailbox_disabled"]
+        tracked.update(_disable_yyds_domain(mailbox, error))
+        tracked["retry_with_new_mailbox"] = tracked["domain_disabled"]
     if str(mailbox.get("provider") or "") != OutlookTokenProvider.name:
         return tracked
     address = str(mailbox.get("address") or "").strip()

@@ -260,10 +260,19 @@ def wait_for_code(mailbox: dict, register_proxy: str = "") -> str | None:
 
 
 class RegisterAttemptError(RuntimeError):
-    def __init__(self, reason: str, mailbox: dict | None = None):
+    def __init__(
+        self,
+        reason: str,
+        mailbox: dict | None = None,
+        *,
+        reputation_recorded: bool = False,
+        reputation_meta: dict[str, Any] | None = None,
+    ):
         super().__init__(reason)
         self.reason = str(reason)
         self.mailbox = dict(mailbox or {})
+        self.reputation_recorded = bool(reputation_recorded)
+        self.reputation_meta = dict(reputation_meta or {})
 
     @property
     def mail_provider(self) -> str:
@@ -290,6 +299,8 @@ def _record_mail_failure(error: Exception) -> dict:
         return {}
     if not isinstance(error, RegisterAttemptError):
         return {}
+    if error.reputation_recorded:
+        return dict(error.reputation_meta)
     provider = error.mail_provider
     domain = error.mail_domain
     if not provider or not domain:
@@ -696,13 +707,18 @@ class PlatformRegistrar:
                 if tracked.get("retry_with_new_mailbox") and mailbox_attempt < REGISTER_LEARNING_MAX_MAILBOX_ATTEMPTS:
                     step(
                         index,
-                        f"邮箱学习模式已标记不可用邮箱，切换新邮箱重试: {str(mailbox.get('address') or '').strip()} ({mailbox_attempt}/{REGISTER_LEARNING_MAX_MAILBOX_ATTEMPTS})",
+                        f"邮箱学习模式已标记不可用域名，切换新邮箱重试: {str(tracked.get('domain') or mailbox.get('domain') or mailbox.get('address') or '').strip()} ({mailbox_attempt}/{REGISTER_LEARNING_MAX_MAILBOX_ATTEMPTS})",
                         "yellow",
                     )
                     continue
                 if isinstance(error, mail_provider.LocalDomainFilteredError):
                     raise
-                raise RegisterAttemptError(str(error), mailbox) from error
+                raise RegisterAttemptError(
+                    str(error),
+                    mailbox,
+                    reputation_recorded=bool(tracked.get("reputation_recorded")),
+                    reputation_meta=tracked,
+                ) from error
         raise RegisterAttemptError("注册流程异常结束")
 
 

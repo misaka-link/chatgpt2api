@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from services.register import domain_reputation, mail_provider, openai_register
@@ -193,10 +195,10 @@ def test_register_records_yyds_domain_reputation(monkeypatch, tmp_path):
     assert store.is_disabled("yyds_mail", "bad.test")
 
 
-def test_yyds_learning_skips_locally_disabled_mailboxes(monkeypatch, tmp_path):
+def test_yyds_learning_retries_when_api_returns_locally_disabled_domain(monkeypatch, tmp_path):
     store = domain_reputation.DomainReputationStore(tmp_path / "mail_domain_reputation.json")
     monkeypatch.setattr(domain_reputation, "store", store)
-    store.disable_mailbox("yyds_mail#1", "user@bad.test", "registration_disallowed")
+    store.upsert_blacklisted_domain("yyds_mail", "bad.test", "registration_disallowed")
 
     provider = mail_provider.YydsMailProvider(
         {
@@ -270,5 +272,107 @@ def test_register_retries_new_yyds_mailbox_on_registration_disallowed(monkeypatc
     assert result["email"] == "second@good.test"
     assert result["mail_domain"] == "good.test"
     assert len(create_account_calls) == 2
-    assert store.is_mailbox_disabled("yyds_mail#1", "first@bad.test") is True
+    assert store.is_disabled("yyds_mail", "bad.test") is True
+    blacklisted = store.list_blacklisted_domains("yyds_mail")
+    assert blacklisted[0]["domain"] == "bad.test"
+    assert blacklisted[0]["hard_fail"] == 1
+
+
+def test_yyds_reputation_manual_blacklisted_domain_crud(monkeypatch, tmp_path):
+    store = domain_reputation.DomainReputationStore(tmp_path / "mail_domain_reputation.json")
+    monkeypatch.setattr(domain_reputation, "store", store)
+
+    store.upsert_blacklisted_domain("yyds_mail", "first@bad.test", "manual-block")
+    items = store.list_blacklisted_domains("yyds_mail")
+    assert items == [
+        {
+            "domain": "bad.test",
+            "success": 0,
+            "hard_fail": 0,
+            "soft_fail": 0,
+            "consecutive_fail": 0,
+            "disabled": True,
+            "reason": "manual-block",
+            "healthy": False,
+            "score": 0,
+            "last_success_at": "",
+            "last_failure_at": items[0]["last_failure_at"],
+            "last_failure_reason": "manual-block",
+            "updated_at": items[0]["updated_at"],
+        }
+    ]
+
+    store.upsert_blacklisted_domain("yyds_mail", "next.test", "updated", previous_domain="first@bad.test")
     assert store.is_disabled("yyds_mail", "bad.test") is False
+    assert store.is_disabled("yyds_mail", "next.test") is True
+
+    store.delete_blacklisted_domain("yyds_mail", "next.test")
+    assert store.list_blacklisted_domains("yyds_mail") == []
+
+
+def test_yyds_reputation_manual_domain_crud_resets_failures(monkeypatch, tmp_path):
+    store = domain_reputation.DomainReputationStore(tmp_path / "mail_domain_reputation.json")
+    monkeypatch.setattr(domain_reputation, "store", store)
+    store.record_failure("yyds_mail", "bad.test", "The email you provided is not supported")
+
+    assert store.is_disabled("yyds_mail", "bad.test") is True
+
+    item = store.upsert_trusted_domain("yyds_mail", "good.test", previous_domain="bad.test")
+    assert item["domain"] == "good.test"
+    assert item["success"] >= 1
+    assert item["hard_fail"] == 0
+    assert item["soft_fail"] == 0
+    assert item["healthy"] is True
+    assert store.is_disabled("yyds_mail", "good.test") is False
+
+    domains = store.list_trusted_domains("yyds_mail")
+    assert [entry["domain"] for entry in domains] == ["good.test"]
+
+    store.delete_domain("yyds_mail", "good.test")
+    assert store.list_trusted_domains("yyds_mail") == []
+
+
+def test_yyds_reputation_migrates_legacy_mailbox_blacklist(monkeypatch, tmp_path):
+    file_path = tmp_path / "mail_domain_reputation.json"
+    file_path.write_text(
+        json.dumps(
+            {
+                "providers": {
+                    "yyds_mail#1": {
+                        "mailboxes": {
+                            "legacy@legacy.test": {
+                                "disabled": True,
+                                "reason": "legacy-block",
+                                "updated_at": "2026-07-07T00:00:00+00:00",
+                            }
+                        }
+                    }
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    store = domain_reputation.DomainReputationStore(file_path)
+    monkeypatch.setattr(domain_reputation, "store", store)
+
+    items = store.list_blacklisted_domains("yyds_mail")
+
+    assert [item["domain"] for item in items] == ["legacy.test"]
+    assert items[0]["reason"] == "legacy-block"
+    data = json.loads(file_path.read_text(encoding="utf-8"))
+    assert "mailboxes" not in json.dumps(data, ensure_ascii=False)
+
+
+def test_mail_provider_entries_preserve_existing_provider_ref():
+    items = mail_provider._entries(
+        {
+            "providers": [
+                {"type": "yyds_mail", "provider_ref": "stable-yyds", "enable": True},
+                {"type": "yyds_mail", "enable": True},
+            ]
+        }
+    )
+
+    assert items[0]["provider_ref"] == "stable-yyds"
+    assert items[1]["provider_ref"] == "yyds_mail#2"

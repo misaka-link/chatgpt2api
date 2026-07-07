@@ -10,6 +10,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Textarea } from "@/components/ui/textarea";
 
 import { useSettingsStore } from "../../settings/store";
+import { YydsLearningPanel } from "./yyds-learning-panel";
 
 export function RegisterCard() {
   const config = useSettingsStore((state) => state.registerConfig);
@@ -182,6 +183,7 @@ export function RegisterCard() {
             <div className="space-y-3">
               {providers.map((provider, index) => {
                 const type = String(provider.type || "tempmail_lol");
+                const providerRef = String(provider.provider_ref || `${type}#${index + 1}`);
                 const domains = Array.isArray(provider.domain) ? provider.domain.map(String).join("\n") : "";
                 const subdomains = Array.isArray(provider.subdomain) ? provider.subdomain.map(String).join("\n") : "";
                 const learningMode = Boolean(provider.learning_mode ?? provider.domain_learning);
@@ -320,6 +322,7 @@ export function RegisterCard() {
                               />
                             </div>
                           ) : null}
+                          {learningMode ? <YydsLearningPanel provider={type} providerRef={providerRef} /> : null}
                         </>
                       ) : null}
                       {type === "outlook_token" ? (
@@ -388,7 +391,7 @@ export function RegisterCard() {
                     {type === "cloudmail_gen" || type === "tempmail_lol" || type === "cloudflare_temp_email" || type === "moemail" || type === "inbucket" || type === "yyds_mail" || type === "ddg_mail" ? (
                       <div className="space-y-2">
                         <label className="text-sm text-stone-700">{type === "cloudmail_gen" ? "邮箱域名" : type === "inbucket" ? "基础域名列表" : "Domain"}</label>
-                        <Textarea value={domains} onChange={(event) => updateProvider(index, { domain: event.target.value.split(/[\n,]/).map((item) => item.trim()).filter(Boolean) })} placeholder={type === "cloudmail_gen" ? "每行一个域名，留空则使用服务默认域名" : type === "inbucket" ? "每行一个基础域名，系统会自动生成随机子域名" : type === "moemail" ? "每行一个域名" : type === "yyds_mail" ? "每行一个白名单域名；非学习模式只会从这里选择，学习模式遇到 registration_disallowed 会自动标记当前邮箱并换新邮箱重试" : "每行一个域名，留空则使用服务默认域名"} className="min-h-20 rounded-xl border-stone-200 bg-white font-mono text-xs" disabled={config.enabled} />
+                        <Textarea value={domains} onChange={(event) => updateProvider(index, { domain: event.target.value.split(/[\n,]/).map((item) => item.trim()).filter(Boolean) })} placeholder={type === "cloudmail_gen" ? "每行一个域名，留空则使用服务默认域名" : type === "inbucket" ? "每行一个基础域名，系统会自动生成随机子域名" : type === "moemail" ? "每行一个域名" : type === "yyds_mail" ? "每行一个白名单域名；非学习模式只会从这里选择，学习模式遇到 registration_disallowed 会自动标记当前域名并换新邮箱重试" : "每行一个域名，留空则使用服务默认域名"} className="min-h-20 rounded-xl border-stone-200 bg-white font-mono text-xs" disabled={config.enabled} />
                       </div>
                     ) : null}
                     {type === "cloudmail_gen" ? (
@@ -461,7 +464,7 @@ export function RegisterCard() {
             <div className="flex items-center justify-between">
               <div>
                 <h3 className="text-sm font-semibold text-stone-900">实时日志</h3>
-                <p className="mt-1 text-xs text-amber-700">遇到 `registration_disallowed` 这类 400 错误时，YYDS 学习模式会自动标记当前邮箱地址不可用并切换新邮箱重试；非学习模式通常需要手动更换域名邮箱。</p>
+                <p className="mt-1 text-xs text-amber-700">遇到 `registration_disallowed` 这类 400 错误时，YYDS 学习模式会自动标记当前域名不可用并切换新邮箱重试；非学习模式通常需要手动更换域名邮箱。</p>
               </div>
               <Badge variant="secondary" className="rounded-md">
                 {logs.length}
