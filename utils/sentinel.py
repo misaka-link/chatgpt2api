@@ -100,8 +100,8 @@ def build_sentinel_token(
     *,
     user_agent: str = "",
     sec_ch_ua: str = "",
-) -> tuple[str, str]:
-    """请求 sentinel token 并返回 (sentinel_header_value, oai_sc_cookie_value)。
+) -> tuple[str, str, str]:
+    """请求 sentinel token 并返回 (sentinel_header_value, oai_sc_cookie_value, so_token)。
 
     Args:
         session: curl_cffi Session 实例
@@ -111,7 +111,8 @@ def build_sentinel_token(
         sec_ch_ua: 可选的 sec-ch-ua 覆盖
 
     Returns:
-        (openai-sentinel-token header value, oai-sc cookie value) 元组
+        (openai-sentinel-token header value, oai-sc cookie value, OpenAI-Sentinel-SO-Token value) 元组；
+        so_token 在服务端未下发时为空字符串，调用方按需写入 header。
 
     Raises:
         RuntimeError: sentinel 请求失败
@@ -142,7 +143,7 @@ def build_sentinel_token(
             {"p": generator.generate_requirements_token(), "t": "", "c": "", "id": device_id, "flow": flow},
             separators=(",", ":"),
         )
-        return fallback, ""
+        return fallback, "", ""
 
     token = str(data.get("token") or "").strip()
     if resp.status_code != 200 or not token:
@@ -156,4 +157,6 @@ def build_sentinel_token(
     sentinel_value = json.dumps({"p": p_value, "t": "", "c": token, "id": device_id, "flow": flow}, separators=(",", ":"))
     # oai-sc cookie = "0" + sentinel token "c" value (the challenge token from the server)
     oai_sc_value = "0" + token
-    return sentinel_value, oai_sc_value
+    # 注册/登录流程也可能收到 so_token，调用方按需带回 OpenAI-Sentinel-SO-Token。
+    so_token = str(data.get("so_token") or "").strip()
+    return sentinel_value, oai_sc_value, so_token

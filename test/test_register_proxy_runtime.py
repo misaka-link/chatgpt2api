@@ -61,6 +61,24 @@ class FakeProxySettings:
 
 
 class RegisterProxyRuntimeTests(unittest.TestCase):
+    def test_apply_sentinel_headers_includes_so_token_when_present(self):
+        headers = {"accept": "application/json"}
+
+        with patch.object(openai_register, "build_sentinel_token", return_value=("sentinel-token", "so-token")):
+            openai_register._apply_sentinel_headers(headers, FakeSession(), "device-1", "authorize_continue")
+
+        self.assertEqual(headers["openai-sentinel-token"], "sentinel-token")
+        self.assertEqual(headers["OpenAI-Sentinel-SO-Token"], "so-token")
+
+    def test_apply_sentinel_headers_skips_so_token_when_absent(self):
+        headers = {"accept": "application/json"}
+
+        with patch.object(openai_register, "build_sentinel_token", return_value=("sentinel-token", "")):
+            openai_register._apply_sentinel_headers(headers, FakeSession(), "device-1", "authorize_continue")
+
+        self.assertEqual(headers["openai-sentinel-token"], "sentinel-token")
+        self.assertNotIn("OpenAI-Sentinel-SO-Token", headers)
+
     def test_create_session_uses_proxy_settings_without_breaking_existing_proxy_argument(self):
         fake_proxy = FakeProxySettings()
         created = []
