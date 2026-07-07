@@ -191,3 +191,84 @@ def test_register_records_yyds_domain_reputation(monkeypatch, tmp_path):
     assert result["bucket"] == "hard"
     assert result["disabled_changed"] is True
     assert store.is_disabled("yyds_mail", "bad.test")
+
+
+def test_yyds_learning_skips_locally_disabled_mailboxes(monkeypatch, tmp_path):
+    store = domain_reputation.DomainReputationStore(tmp_path / "mail_domain_reputation.json")
+    monkeypatch.setattr(domain_reputation, "store", store)
+    store.disable_mailbox("yyds_mail#1", "user@bad.test", "registration_disallowed")
+
+    provider = mail_provider.YydsMailProvider(
+        {
+            "provider_ref": "yyds_mail#1",
+            "api_key": "token",
+            "domain": ["bad.test", "good.test"],
+            "learning_mode": True,
+            "domain_explore_rate": 0,
+        },
+        {"request_timeout": 1, "wait_timeout": 1, "wait_interval": 1, "user_agent": "pytest", "proxy": ""},
+    )
+    requests = []
+
+    def fake_request(method, path, token="", params=None, payload=None, expected=(200, 201, 204)):
+        if path == "/domains":
+            return {"items": []}
+        requests.append(dict(payload or {}))
+        if len(requests) == 1:
+            return {"address": "user@bad.test", "token": "mail-token-1"}
+        return {"address": "user@good.test", "token": "mail-token-2"}
+
+    provider._request = fake_request
+    try:
+        mailbox = provider.create_mailbox("user")
+    finally:
+        provider.close()
+
+    assert len(requests) == 2
+    assert mailbox["address"] == "user@good.test"
+    assert mailbox["learning_mode"] is True
+
+
+def test_register_retries_new_yyds_mailbox_on_registration_disallowed(monkeypatch, tmp_path):
+    store = domain_reputation.DomainReputationStore(tmp_path / "mail_domain_reputation.json")
+    monkeypatch.setattr(domain_reputation, "store", store)
+
+    class FakeSession:
+        def close(self):
+            pass
+
+    mailboxes = [
+        {"provider": "yyds_mail", "provider_ref": "yyds_mail#1", "address": "first@bad.test", "domain": "bad.test", "token": "mail-token-1", "learning_mode": True},
+        {"provider": "yyds_mail", "provider_ref": "yyds_mail#1", "address": "second@good.test", "domain": "good.test", "token": "mail-token-2", "learning_mode": True},
+    ]
+    create_account_calls = []
+
+    monkeypatch.setattr(openai_register, "create_session", lambda proxy="": FakeSession())
+    monkeypatch.setattr(openai_register, "create_mailbox", lambda username=None, register_proxy="": dict(mailboxes.pop(0)))
+    monkeypatch.setattr(openai_register, "wait_for_code", lambda mailbox, register_proxy="": "123456")
+    monkeypatch.setattr(openai_register.PlatformRegistrar, "_platform_authorize", lambda self, email, index: None)
+    monkeypatch.setattr(openai_register.PlatformRegistrar, "_register_user", lambda self, email, password, index: None)
+    monkeypatch.setattr(openai_register.PlatformRegistrar, "_send_otp", lambda self, index: None)
+    monkeypatch.setattr(openai_register.PlatformRegistrar, "_validate_otp", lambda self, code, index: None)
+    monkeypatch.setattr(openai_register.PlatformRegistrar, "_exchange_registered_tokens", lambda self, index: {"access_token": "access", "refresh_token": "refresh", "id_token": "id"})
+
+    def fake_create_account(self, name, birthdate, index):
+        create_account_calls.append((name, birthdate, index))
+        if len(create_account_calls) == 1:
+            raise RuntimeError(
+                'create_account_http_400, detail={"error": {"message": "Sorry, we cannot create your account with the given information.", "type": "invalid_request_error", "param": null, "code": "registration_disallowed"}}'
+            )
+
+    monkeypatch.setattr(openai_register.PlatformRegistrar, "_create_account", fake_create_account)
+
+    registrar = openai_register.PlatformRegistrar()
+    try:
+        result = registrar.register(1)
+    finally:
+        registrar.close()
+
+    assert result["email"] == "second@good.test"
+    assert result["mail_domain"] == "good.test"
+    assert len(create_account_calls) == 2
+    assert store.is_mailbox_disabled("yyds_mail#1", "first@bad.test") is True
+    assert store.is_disabled("yyds_mail", "bad.test") is False

@@ -33,6 +33,10 @@ MAIL_API_429_COOLDOWN_SECONDS = 30
 mail_api_cooldown_lock = Lock()
 mail_api_cooldown_until = 0.0
 YYDS_DOMAINS_CACHE_SECONDS = 600.0
+YYDS_LEARNING_MAILBOX_RETRY_MARKERS = (
+    "registration_disallowed",
+    "Sorry, we cannot create your account with the given information.",
+)
 
 
 def _load_ddg_aliases() -> set[str]:
@@ -361,6 +365,10 @@ def _normalize_domain_text(value: Any) -> str:
     return text.strip(".")
 
 
+def _normalize_mailbox_text(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
 def _extract_yyds_domains(data: Any) -> list[str]:
     if isinstance(data, dict):
         raw_items = data.get("items") or data.get("domains") or data.get("data") or []
@@ -589,6 +597,31 @@ class BaseMailProvider:
 
     def close(self) -> None:
         pass
+
+
+def _provider_scope_from_mailbox(mailbox: dict[str, Any]) -> str:
+    return str(mailbox.get("provider_ref") or mailbox.get("provider") or "unknown").strip() or "unknown"
+
+
+def _yyds_learning_enabled(mailbox: dict[str, Any]) -> bool:
+    return str(mailbox.get("provider") or "") == YydsMailProvider.name and _bool(mailbox.get("learning_mode"), False)
+
+
+def _should_disable_yyds_mailbox(mailbox: dict[str, Any], error: Exception | str | None) -> bool:
+    if not _yyds_learning_enabled(mailbox):
+        return False
+    reason = str(error or "")
+    return any(marker in reason for marker in YYDS_LEARNING_MAILBOX_RETRY_MARKERS)
+
+
+def _disable_yyds_mailbox(mailbox: dict[str, Any], error: Exception | str | None) -> dict[str, Any]:
+    if not _should_disable_yyds_mailbox(mailbox, error):
+        return {"mailbox_disabled": False, "disabled_changed": False}
+    address = _normalize_mailbox_text(mailbox.get("address"))
+    if not address:
+        return {"mailbox_disabled": False, "disabled_changed": False}
+    result = domain_reputation.store.disable_mailbox(_provider_scope_from_mailbox(mailbox), address, str(error or ""))
+    return {"mailbox_disabled": True, "disabled_changed": bool(result.get("disabled_changed"))}
 
 
 class CloudflareTempMailProvider(BaseMailProvider):
@@ -1282,6 +1315,9 @@ class YydsMailProvider(BaseMailProvider):
         self._available_domains_cache = (now, domains)
         return list(domains)
 
+    def _provider_scope(self) -> str:
+        return str(self.provider_ref or self.name).strip() or self.name
+
     def _select_domain(self, allow_empty: bool = False, seed_domains: list[str] | None = None, include_learned: bool = True) -> str:
         seed_domains = [str(item).strip() for item in (seed_domains or self.domain or self._fetch_available_domains()) if str(item).strip()]
         if not seed_domains:
@@ -1310,40 +1346,57 @@ class YydsMailProvider(BaseMailProvider):
         raise LocalDomainFilteredError("YYDSMail 未配置可用域名，且 /v1/domains 未返回可用域名")
 
     def create_mailbox(self, username: str | None = None) -> dict[str, Any]:
-        payload = {"localPart": username or _random_mailbox_name()}
-        if self.wildcard:
-            api_domains = self._fetch_available_domains()
-            seed_domains = api_domains or self.domain
-            if api_domains:
-                domain = self._select_domain(allow_empty=True, seed_domains=api_domains, include_learned=False)
-                if domain:
-                    payload["domain"] = domain
-            elif seed_domains:
-                domain = self._select_domain(allow_empty=True, seed_domains=seed_domains)
-                if domain:
-                    payload["domain"] = domain
-            if self.subdomain:
-                payload["subdomain"] = self.subdomain
-            data = self._request("POST", "/accounts/wildcard", payload=payload)
-        else:
-            api_domains = self._fetch_available_domains()
-            seed_domains = api_domains or self.domain
-            if api_domains:
-                payload["domain"] = self._select_domain(seed_domains=api_domains, include_learned=False)
-            elif seed_domains:
-                payload["domain"] = self._select_domain(seed_domains=seed_domains)
+        max_attempts = 5 if self.learning_mode else 1
+        last_disabled = ""
+        for attempt in range(max_attempts):
+            payload = {"localPart": username or _random_mailbox_name()}
+            if self.wildcard:
+                api_domains = self._fetch_available_domains()
+                seed_domains = api_domains or self.domain
+                if api_domains:
+                    domain = self._select_domain(allow_empty=True, seed_domains=api_domains, include_learned=False)
+                    if domain:
+                        payload["domain"] = domain
+                elif seed_domains:
+                    domain = self._select_domain(allow_empty=True, seed_domains=seed_domains)
+                    if domain:
+                        payload["domain"] = domain
+                if self.subdomain:
+                    payload["subdomain"] = self.subdomain
+                data = self._request("POST", "/accounts/wildcard", payload=payload)
             else:
-                # 让 YYDS 官方选择当前可用域名，避免继续使用仓库内置的过期静态域名。
-                payload["autoDomainStrategy"] = "balanced"
-            if self.subdomain:
-                payload["subdomain"] = self.subdomain
-            data = self._request("POST", "/accounts", payload=payload)
-        address = str(data.get("address") or data.get("email") or "").strip()
-        token = str(data.get("token") or data.get("temp_token") or data.get("tempToken") or data.get("access_token") or "").strip()
-        if not address or not token:
-            raise RuntimeError("YYDSMail 缺少 address 或 token")
-        domain = address.rsplit("@", 1)[-1].strip().lower() if "@" in address else str(payload.get("domain") or "").strip().lower()
-        return {"provider": self.name, "provider_ref": self.provider_ref, "address": address, "domain": domain, "token": token, "account_id": str(data.get("id") or "")}
+                api_domains = self._fetch_available_domains()
+                seed_domains = api_domains or self.domain
+                if api_domains:
+                    payload["domain"] = self._select_domain(seed_domains=api_domains, include_learned=False)
+                elif seed_domains:
+                    payload["domain"] = self._select_domain(seed_domains=seed_domains)
+                else:
+                    # 让 YYDS 官方选择当前可用域名，避免继续使用仓库内置的过期静态域名。
+                    payload["autoDomainStrategy"] = "balanced"
+                if self.subdomain:
+                    payload["subdomain"] = self.subdomain
+                data = self._request("POST", "/accounts", payload=payload)
+            address = str(data.get("address") or data.get("email") or "").strip()
+            token = str(data.get("token") or data.get("temp_token") or data.get("tempToken") or data.get("access_token") or "").strip()
+            if not address or not token:
+                raise RuntimeError("YYDSMail 缺少 address 或 token")
+            if self.learning_mode and domain_reputation.store.is_mailbox_disabled(self._provider_scope(), address):
+                last_disabled = address
+                if attempt + 1 < max_attempts:
+                    continue
+                break
+            domain = address.rsplit("@", 1)[-1].strip().lower() if "@" in address else str(payload.get("domain") or "").strip().lower()
+            return {
+                "provider": self.name,
+                "provider_ref": self.provider_ref,
+                "address": address,
+                "domain": domain,
+                "token": token,
+                "account_id": str(data.get("id") or ""),
+                "learning_mode": self.learning_mode,
+            }
+        raise RuntimeError(f"YYDSMail 连续返回本地已禁用邮箱: {last_disabled or 'unknown'}")
 
     def fetch_latest_message(self, mailbox: dict[str, Any]) -> dict[str, Any] | None:
         data = self._request("GET", "/messages", token=str(mailbox.get("token") or ""), params={"address": mailbox["address"]})
@@ -1764,25 +1817,31 @@ def wait_for_code(mail_config: dict, mailbox: dict) -> str | None:
         provider.close()
 
 
-def mark_mailbox_result(mailbox: dict, *, success: bool, error: Exception | str | None = None) -> None:
+def mark_mailbox_result(mailbox: dict, *, success: bool, error: Exception | str | None = None) -> dict[str, Any]:
     """注册流程结束后更新邮箱池状态。
 
-    仅对 outlook_token 邮箱生效：成功标记 used；失败时若是 token 失效标记 token_invalid，
+    outlook_token：成功标记 used；失败时若是 token 失效标记 token_invalid，
     其余失败标记 failed（保留邮箱占用以便排查，可通过重置释放）。
+    yyds_mail 学习模式：遇到明确的注册拒绝时，把邮箱地址标记为本地不可用，并提示上层换新邮箱重试。
     """
+    tracked = {"retry_with_new_mailbox": False, "mailbox_disabled": False, "disabled_changed": False}
+    if not success:
+        tracked.update(_disable_yyds_mailbox(mailbox, error))
+        tracked["retry_with_new_mailbox"] = tracked["mailbox_disabled"]
     if str(mailbox.get("provider") or "") != OutlookTokenProvider.name:
-        return
+        return tracked
     address = str(mailbox.get("address") or "").strip()
     if not address:
-        return
+        return tracked
     if success:
         _set_outlook_token_state(address, "used")
-        return
+        return tracked
     reason = str(error or "").strip()
     if isinstance(error, OutlookTokenError) or "OutlookToken 刷新失败" in reason or "access_token" in reason:
         _set_outlook_token_state(address, "token_invalid", reason[:300])
     else:
         _set_outlook_token_state(address, "failed", reason[:300])
+    return tracked
 
 
 def release_mailbox(mailbox: dict) -> None:

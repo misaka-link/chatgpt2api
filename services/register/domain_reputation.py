@@ -91,6 +91,11 @@ def _domains(values: list[str]) -> list[str]:
     return out
 
 
+def _mailbox(value: str) -> str:
+    text = str(value or "").strip().lower()
+    return text if "@" in text else ""
+
+
 def classify_failure(reason: str) -> str:
     text = str(reason or "")
     if any(marker in text for marker in HARD_FAILURE_MARKERS):
@@ -166,6 +171,34 @@ class DomainReputationStore:
             out["bucket"] = bucket
             out["disabled_changed"] = bool(record.get("disabled")) and not was_disabled
             return out
+
+    def disable_mailbox(self, provider: str, address: str, reason: str) -> dict[str, Any]:
+        mailbox = _mailbox(address)
+        if not mailbox:
+            return {"disabled": False, "disabled_changed": False}
+        with self._lock:
+            data = self._load_locked()
+            providers = data.setdefault("providers", {})
+            provider_data = providers.setdefault(str(provider or "unknown"), {})
+            mailboxes = provider_data.setdefault("mailboxes", {})
+            record = mailboxes.setdefault(mailbox, {})
+            was_disabled = bool(record.get("disabled"))
+            record["disabled"] = True
+            record["reason"] = str(reason or "")[:500]
+            record["updated_at"] = _now()
+            self._save_locked(data)
+            out = dict(record)
+            out["disabled_changed"] = bool(record.get("disabled")) and not was_disabled
+            return out
+
+    def is_mailbox_disabled(self, provider: str, address: str) -> bool:
+        mailbox = _mailbox(address)
+        if not mailbox:
+            return False
+        with self._lock:
+            data = self._load_locked()
+            record = (((data.get("providers") or {}).get(str(provider or "unknown")) or {}).get("mailboxes") or {}).get(mailbox) or {}
+            return bool(record.get("disabled"))
 
     def is_disabled(self, provider: str, domain: str) -> bool:
         domain = _domain(domain)

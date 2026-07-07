@@ -54,6 +54,7 @@ user_agent = (
 sec_ch_ua = '"Google Chrome";v="145", "Not?A_Brand";v="8", "Chromium";v="145"'
 sec_ch_ua_full_version_list = '"Chromium";v="145.0.0.0", "Not:A-Brand";v="99.0.0.0", "Google Chrome";v="145.0.0.0"'
 default_timeout = 30
+REGISTER_LEARNING_MAX_MAILBOX_ATTEMPTS = 3
 print_lock = threading.Lock()
 stats_lock = threading.Lock()
 stats = {"done": 0, "success": 0, "fail": 0, "start_time": 0.0}
@@ -456,6 +457,18 @@ class PlatformRegistrar:
     def close(self) -> None:
         self.session.close()
 
+    def _reset_attempt_state(self) -> None:
+        try:
+            self.session.close()
+        except Exception:
+            pass
+        self.session = create_session(self.proxy)
+        self.clearance_user_agent = ""
+        self.clearance_failure_reason = ""
+        self.device_id = str(uuid.uuid4())
+        self.code_verifier = ""
+        self.platform_auth_code = ""
+
     def _navigate_headers(self, referer: str = "") -> dict[str, str]:
         headers = dict(navigate_headers)
         if referer:
@@ -636,47 +649,61 @@ class PlatformRegistrar:
         return tokens
 
     def register(self, index: int) -> dict:
-        step(index, "开始创建邮箱")
-        mailbox = create_mailbox(register_proxy=self.proxy)
-        email = str(mailbox.get("address") or "").strip()
-        if not email:
-            mail_provider.release_mailbox(mailbox)
-            raise RuntimeError("邮箱服务未返回 address")
-        label = str(mailbox.get("label") or "")
-        step(index, f"邮箱创建完成[{label}]: {email}")
-        try:
-            password = _random_password()
-            first_name, last_name = _random_name()
-            self._platform_authorize(email, index)
-            self._register_user(email, password, index)
-            self._send_otp(index)
-            step(index, "开始等待注册验证码")
-            code = wait_for_code(mailbox, register_proxy=self.proxy)
-            if not code:
-                raise RuntimeError("等待注册验证码超时")
-            step(index, f"收到注册验证码: {code}")
-            self._validate_otp(code, index)
-            self._create_account(f"{first_name} {last_name}", _random_birthdate(), index)
-            tokens = self._exchange_registered_tokens(index)
-            mail_domain = str(mailbox.get("domain") or (email.rsplit("@", 1)[-1] if "@" in email else "")).strip().lower()
-        except Exception as error:
-            mail_provider.mark_mailbox_result(mailbox, success=False, error=error)
-            if isinstance(error, mail_provider.LocalDomainFilteredError):
-                raise
-            raise RegisterAttemptError(str(error), mailbox) from error
-        mail_provider.mark_mailbox_result(mailbox, success=True)
-        return {
-            "email": email,
-            "password": password,
-            "access_token": str(tokens.get("access_token") or "").strip(),
-            "refresh_token": str(tokens.get("refresh_token") or "").strip(),
-            "id_token": str(tokens.get("id_token") or "").strip(),
-            "mail_provider": str(mailbox.get("provider") or "").strip(),
-            "mail_provider_ref": str(mailbox.get("provider_ref") or "").strip(),
-            "mail_domain": mail_domain,
-            "source_type": "web",
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }
+        for mailbox_attempt in range(1, REGISTER_LEARNING_MAX_MAILBOX_ATTEMPTS + 1):
+            self._reset_attempt_state()
+            mailbox: dict[str, Any] = {}
+            try:
+                step(index, "开始创建邮箱")
+                mailbox = create_mailbox(register_proxy=self.proxy)
+                email = str(mailbox.get("address") or "").strip()
+                if not email:
+                    mail_provider.release_mailbox(mailbox)
+                    raise RuntimeError("邮箱服务未返回 address")
+                label = str(mailbox.get("label") or "")
+                if _truthy(mailbox.get("learning_mode"), False):
+                    step(index, f"邮箱创建完成[{label}]，当前尝试 {mailbox_attempt}/{REGISTER_LEARNING_MAX_MAILBOX_ATTEMPTS}: {email}")
+                else:
+                    step(index, f"邮箱创建完成[{label}]: {email}")
+                password = _random_password()
+                first_name, last_name = _random_name()
+                self._platform_authorize(email, index)
+                self._register_user(email, password, index)
+                self._send_otp(index)
+                step(index, "开始等待注册验证码")
+                code = wait_for_code(mailbox, register_proxy=self.proxy)
+                if not code:
+                    raise RuntimeError("等待注册验证码超时")
+                step(index, f"收到注册验证码: {code}")
+                self._validate_otp(code, index)
+                self._create_account(f"{first_name} {last_name}", _random_birthdate(), index)
+                tokens = self._exchange_registered_tokens(index)
+                mail_domain = str(mailbox.get("domain") or (email.rsplit("@", 1)[-1] if "@" in email else "")).strip().lower()
+                mail_provider.mark_mailbox_result(mailbox, success=True)
+                return {
+                    "email": email,
+                    "password": password,
+                    "access_token": str(tokens.get("access_token") or "").strip(),
+                    "refresh_token": str(tokens.get("refresh_token") or "").strip(),
+                    "id_token": str(tokens.get("id_token") or "").strip(),
+                    "mail_provider": str(mailbox.get("provider") or "").strip(),
+                    "mail_provider_ref": str(mailbox.get("provider_ref") or "").strip(),
+                    "mail_domain": mail_domain,
+                    "source_type": "web",
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                }
+            except Exception as error:
+                tracked = mail_provider.mark_mailbox_result(mailbox, success=False, error=error) if mailbox else {}
+                if tracked.get("retry_with_new_mailbox") and mailbox_attempt < REGISTER_LEARNING_MAX_MAILBOX_ATTEMPTS:
+                    step(
+                        index,
+                        f"邮箱学习模式已标记不可用邮箱，切换新邮箱重试: {str(mailbox.get('address') or '').strip()} ({mailbox_attempt}/{REGISTER_LEARNING_MAX_MAILBOX_ATTEMPTS})",
+                        "yellow",
+                    )
+                    continue
+                if isinstance(error, mail_provider.LocalDomainFilteredError):
+                    raise
+                raise RegisterAttemptError(str(error), mailbox) from error
+        raise RegisterAttemptError("注册流程异常结束")
 
 
 def worker(index: int) -> dict:
