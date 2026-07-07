@@ -307,25 +307,30 @@ def _record_mail_failure(error: Exception) -> dict:
         return {}
     return domain_reputation.store.record_failure(provider, domain, error.reason)
 
-from utils.sentinel import SentinelTokenGenerator, build_sentinel_token as _build_sentinel_token_tuple  # noqa: F401
+from utils.sentinel import build_sentinel_token as _build_sentinel_token_tuple  # noqa: F401
 
 
-def build_sentinel_token(session: requests.Session, device_id: str, flow: str) -> tuple[str, str]:
-    """请求 sentinel token，返回 (sentinel header 字符串, so_token)。"""
-    sentinel_val, _oai_sc_val, so_val = _build_sentinel_token_tuple(
+def build_sentinel_token(session: requests.Session, device_id: str, flow: str) -> tuple[str, str, str]:
+    """请求 sentinel token，返回 (sentinel header, oai-sc cookie, so_token)。"""
+    sentinel_val, oai_sc_val, so_val = _build_sentinel_token_tuple(
         session,
         device_id,
         flow,
         user_agent=user_agent,
         sec_ch_ua=sec_ch_ua,
     )
-    return sentinel_val, so_val
+    return sentinel_val, oai_sc_val, so_val
 
 
 def _apply_sentinel_headers(headers: dict[str, str], session: requests.Session, device_id: str, flow: str) -> None:
     """生成 sentinel token 并写入注册/校验流程所需 header。"""
-    sentinel_token, so_token = build_sentinel_token(session, device_id, flow)
+    sentinel_token, oai_sc_value, so_token = build_sentinel_token(session, device_id, flow)
     headers["openai-sentinel-token"] = sentinel_token
+    if oai_sc_value:
+        try:
+            session.cookies.set("oai-sc", oai_sc_value, domain=".openai.com")
+        except Exception:
+            pass
     if so_token:
         headers["OpenAI-Sentinel-SO-Token"] = so_token
 
@@ -569,6 +574,40 @@ class PlatformRegistrar:
         # 真正的判定交给 user/register（失败会 dump 完整响应）。
         step(index, f"platform authorize 完成[{landed or '?'}] url={str(getattr(resp, 'url', '') or '')[:160]}")
 
+    def _authorize_continue(self, email: str, index: int) -> None:
+        step(index, "开始提交注册邮箱")
+        url = f"{auth_base}/api/accounts/authorize/continue"
+        headers = self._json_headers(f"{auth_base}/create-account")
+        _apply_sentinel_headers(headers, self.session, self.device_id, "authorize_continue")
+        headers = _headers_with_clearance(headers, url, self.proxy, self.clearance_user_agent)
+        payload = {
+            "username": {"value": email, "kind": "email"},
+            "screen_hint": "signup",
+        }
+        resp, error = request_with_local_retry(self.session, "post", url, json=payload, headers=headers, verify=False)
+        if _is_cloudflare_challenge(resp):
+            bundle = self._refresh_cloudflare_clearance(auth_base, index)
+            if bundle is None:
+                raise RuntimeError(_cloudflare_block_message(resp, reason=self.clearance_failure_reason))
+            headers = self._json_headers(f"{auth_base}/create-account")
+            _apply_sentinel_headers(headers, self.session, self.device_id, "authorize_continue")
+            headers = _headers_with_clearance(headers, url, self.proxy, self.clearance_user_agent)
+            resp, error = request_with_local_retry(self.session, "post", url, json=payload, headers=headers, verify=False)
+            if _is_cloudflare_challenge(resp):
+                raise RuntimeError(_cloudflare_block_message(resp, "Cloudflare clearance 重试仍被拦截"))
+        if resp is None or resp.status_code != 200:
+            data = _response_json(resp) if resp is not None else {}
+            detail = f", detail={json.dumps(data, ensure_ascii=False)}" if data else ""
+            raise RuntimeError(error or f"authorize_continue_http_{getattr(resp, 'status_code', 'unknown')}{detail}")
+        data = _response_json(resp)
+        page_type = str(((data.get("page") or {}) if isinstance(data, dict) else {}).get("type") or "").strip()
+        continue_url = str(data.get("continue_url") or "").strip()
+        if page_type and page_type != "create_account_password":
+            raise RuntimeError(f"authorize_continue_unexpected_page:{page_type}")
+        if continue_url and "/create-account/password" not in continue_url:
+            raise RuntimeError(f"authorize_continue_unexpected_continue_url:{continue_url}")
+        step(index, "注册邮箱提交完成")
+
     def _register_user(self, email: str, password: str, index: int) -> None:
         step(index, "开始提交注册密码")
         url = f"{auth_base}/api/accounts/user/register"
@@ -678,6 +717,7 @@ class PlatformRegistrar:
                 password = _random_password()
                 first_name, last_name = _random_name()
                 self._platform_authorize(email, index)
+                self._authorize_continue(email, index)
                 self._register_user(email, password, index)
                 self._send_otp(index)
                 step(index, "开始等待注册验证码")

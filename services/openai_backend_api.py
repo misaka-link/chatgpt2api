@@ -549,13 +549,16 @@ class OpenAIBackendAPI:
             payload["thinking_effort"] = normalized_effort
         return payload
 
-    def _image_model_slug(self, model: str) -> str:
+    def _image_model_slug(self, model: str, override_slug: str = "") -> str:
         """把标准图片模型名映射到底层 model slug。"""
+        normalized_override = str(override_slug or "").strip()
+        if normalized_override:
+            return normalized_override
         _, base_model = split_image_model(model)
         if not base_model:
             return "auto"
         if base_model == "gpt-image-2":
-            return "gpt-5-3"
+            return config.image_web_model_slug
         if base_model == CODEX_IMAGE_MODEL:
             return base_model
         return "auto"
@@ -844,14 +847,20 @@ class OpenAIBackendAPI:
             retry_after = int(retry_after_header) if str(retry_after_header or "").isdigit() else None
             raise UpstreamHTTPError(path, error.code, body, retry_after=retry_after) from error
 
-    def _prepare_image_conversation(self, prompt: str, requirements: ChatRequirements, model: str) -> str:
+    def _prepare_image_conversation(
+            self,
+            prompt: str,
+            requirements: ChatRequirements,
+            model: str,
+            override_slug: str = "",
+    ) -> str:
         """为图片生成准备 conduit token。"""
         path = "/backend-api/f/conversation/prepare"
         payload = {
             "action": "next",
             "fork_from_shared_post": False,
             "parent_message_id": new_uuid(),
-            "model": self._image_model_slug(model),
+            "model": self._image_model_slug(model, override_slug),
             "client_prepare_state": "success",
             "timezone_offset_min": -480,
             "timezone": "Asia/Shanghai",
@@ -949,8 +958,15 @@ class OpenAIBackendAPI:
             "height": height,
         }
 
-    def _start_image_generation(self, prompt: str, requirements: ChatRequirements, conduit_token: str, model: str,
-                                references: Optional[list[Dict[str, Any]]] = None) -> requests.Response:
+    def _start_image_generation(
+            self,
+            prompt: str,
+            requirements: ChatRequirements,
+            conduit_token: str,
+            model: str,
+            references: Optional[list[Dict[str, Any]]] = None,
+            override_slug: str = "",
+    ) -> requests.Response:
         """启动图片生成或编辑的 SSE 请求。"""
         references = references or []
         parts = [{
@@ -989,7 +1005,7 @@ class OpenAIBackendAPI:
                 "metadata": metadata,
             }],
             "parent_message_id": new_uuid(),
-            "model": self._image_model_slug(model),
+            "model": self._image_model_slug(model, override_slug),
             "client_prepare_state": "sent",
             "timezone_offset_min": -480,
             "timezone": "Asia/Shanghai",
@@ -2540,10 +2556,11 @@ class OpenAIBackendAPI:
             images: Optional[list[str]] = None,
             system_hints: Optional[list[str]] = None,
             thinking_effort: str = "",
+            image_model_slug_override: str = "",
     ) -> Iterator[str]:
         system_hints = system_hints or []
         if "picture_v2" in system_hints:
-            yield from self._stream_picture_conversation(prompt, model, images or [])
+            yield from self._stream_picture_conversation(prompt, model, images or [], image_model_slug_override)
             return
 
         normalized = messages or [{"role": "user", "content": prompt}]
@@ -2577,6 +2594,7 @@ class OpenAIBackendAPI:
             prompt: str,
             model: str,
             images: list[str],
+            override_slug: str = "",
     ) -> Iterator[str]:
         if not self.access_token:
             raise RuntimeError("access_token is required for image endpoints")
@@ -2587,9 +2605,9 @@ class OpenAIBackendAPI:
         self._report_progress("getting_token")
         requirements = self._get_chat_requirements()
         self._report_progress("preparing_conversation")
-        conduit_token = self._prepare_image_conversation(prompt, requirements, model)
+        conduit_token = self._prepare_image_conversation(prompt, requirements, model, override_slug)
         self._report_progress("starting_generation")
-        response = self._start_image_generation(prompt, requirements, conduit_token, model, references)
+        response = self._start_image_generation(prompt, requirements, conduit_token, model, references, override_slug)
         self._report_progress("generating")
         try:
             yield from iter_sse_payloads(response)

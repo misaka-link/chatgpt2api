@@ -58,6 +58,23 @@ class ConfigLoadingTests(unittest.TestCase):
                 else:
                     module.os.environ["CHATGPT2API_AUTH_KEY"] = old_env_auth_key
 
+    def test_config_store_normalizes_image_web_model_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_path = Path(tmp_dir) / "config.json"
+            config_path.write_text(json.dumps({"auth-key": "test-auth"}), encoding="utf-8")
+
+            module = self.config_module
+            store = module.ConfigStore(config_path)
+            result = store.update({
+                "image_web_model_slug": " ",
+                "image_web_fallback_enabled": "false",
+                "image_web_fallback_model_slugs": [" gpt-5-5 ", "", "gpt-5-3", "gpt-5-5"],
+            })
+
+            self.assertEqual(result["image_web_model_slug"], "gpt-5-5-thinking")
+            self.assertFalse(result["image_web_fallback_enabled"])
+            self.assertEqual(result["image_web_fallback_model_slugs"], ["gpt-5-5", "gpt-5-3"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -118,6 +118,8 @@ environment:
 
 - 内置在线画图工作台，支持生成、图片编辑与多图组图编辑
 - 支持 `gpt-image-2`、`codex-gpt-image-2`、`auto`、`gpt-5`、`gpt-5-1`、`gpt-5-2`、`gpt-5-3`、`gpt-5-3-mini`、`gpt-5-mini` 模型选择
+- 设置页可为 `gpt-image-2` 配置 ChatGPT Web `picture_v2` 链路的底层内部模型，默认 `gpt-5-5-thinking`，支持切换到 `gpt-5-5`、`gpt-5-3` 或自定义 slug
+- 支持为 `gpt-image-2` 配置失败后自动切换备用内部模型；遇到无图、轮询超时或模型不可用时，会按顺序继续尝试备用模型
 - 编辑模式支持参考图上传
 - 前端支持多图生成交互
 - 本地保存图片会话历史，支持回看、删除和清空
@@ -139,7 +141,7 @@ environment:
 - 支持四种导入方式：本地 CPA JSON 文件导入、远程 CPA 服务器导入、`sub2api` 服务器导入、`access_token` 导入
 - 支持在设置页配置 `sub2api` 服务器，筛选并批量导入其中的 OpenAI OAuth 账号
 - 注册邮箱支持 YYDSMail 动态域名获取和学习模式，会优先使用接口返回的可用域名，接口不可用时回退到配置域名或官方自动选域策略；当学习模式遇到 `registration_disallowed` / “Sorry, we cannot create your account with the given information.” 时，会把当前邮箱对应的域名标记为本地不可用并自动切换新邮箱重试；注册页会在学习模式下展示可编辑的黑名单域名列表和信任域名列表，支持新增、编辑、删除、清空全部并立即生效
-- 注册和密码登录流程会在 Sentinel 服务端下发 `so_token` 时自动附带 `OpenAI-Sentinel-SO-Token` 请求头，未下发时保持原有行为不变
+- 注册流程已对齐当前官方浏览器链路：邮箱阶段会先走 `authorize` + `authorize/continue`，验证码通过后的 `create_account` 会使用当前官方 Sentinel SDK 生成 `OpenAI-Sentinel-Token` 与 `OpenAI-Sentinel-SO-Token` 两个请求头；密码登录也会复用同一套 SDK 生成逻辑，日志只记录 SDK 版本、token 长度和 `so-token` 是否生成，不打印明文
 - 注册邮箱 API 遇到 HTTP 429 时会触发同进程注册线程共享的 30 秒冷却，冷却后自动重试当前请求
 
 ### 实验性 / 规划中
@@ -218,7 +220,7 @@ curl http://localhost:8000/v1/images/generations \
 
 | 字段                | 说明                                                 |
 |:------------------|:---------------------------------------------------|
-| `model`           | 图片模型，当前可用值以 `/v1/models` 返回结果为准，推荐使用 `gpt-image-2` |
+| `model`           | 图片模型，当前可用值以 `/v1/models` 返回结果为准，推荐使用 `gpt-image-2`；其底层 ChatGPT Web 生图内部模型可在设置页单独配置 |
 | `prompt`          | 图片生成提示词                                            |
 | `n`               | 生成数量，当前后端限制为 `1-4`                                 |
 | `response_format` | 当前请求模型中包含该字段，默认值为 `b64_json`                       |

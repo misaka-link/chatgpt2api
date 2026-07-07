@@ -155,6 +155,9 @@ export type ThirdPartyAppsSettings = {
 export type SettingsConfig = {
   proxy: string;
   base_url?: string;
+  image_web_model_slug?: string;
+  image_web_fallback_enabled?: boolean;
+  image_web_fallback_model_slugs?: string[];
   global_system_prompt?: string;
   sensitive_words?: string[];
   ai_review?: {

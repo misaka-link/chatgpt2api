@@ -73,6 +73,25 @@ const DEFAULT_THIRD_PARTY_APPS: ThirdPartyAppsSettings = {
   },
 };
 
+const DEFAULT_IMAGE_WEB_MODEL_SLUG = "gpt-5-5-thinking";
+const DEFAULT_IMAGE_WEB_FALLBACK_MODEL_SLUGS = ["gpt-5-5", "gpt-5-3"];
+
+function normalizeModelSlugList(value: unknown, fallback = DEFAULT_IMAGE_WEB_FALLBACK_MODEL_SLUGS): string[] {
+  const items = Array.isArray(value)
+    ? value
+    : typeof value === "string"
+      ? value.split(/[\n\r,]+/)
+      : fallback;
+  const normalized: string[] = [];
+  for (const item of items) {
+    const slug = String(item || "").trim();
+    if (slug && !normalized.includes(slug)) {
+      normalized.push(slug);
+    }
+  }
+  return normalized.length > 0 ? normalized : [...fallback];
+}
+
 function normalizeProxyRuntime(value: unknown): ProxyRuntimeSettings {
   const source = typeof value === "object" && value !== null ? value as Partial<ProxyRuntimeSettings> : {};
   const clearanceSource = typeof source.clearance === "object" && source.clearance !== null
@@ -177,6 +196,9 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     image_retention_days: Number(config.image_retention_days || 30),
     image_poll_timeout_secs: Number(config.image_poll_timeout_secs || 120),
     image_account_concurrency: Number(config.image_account_concurrency || 3),
+    image_web_model_slug: String(config.image_web_model_slug || DEFAULT_IMAGE_WEB_MODEL_SLUG).trim() || DEFAULT_IMAGE_WEB_MODEL_SLUG,
+    image_web_fallback_enabled: Boolean(config.image_web_fallback_enabled !== false),
+    image_web_fallback_model_slugs: normalizeModelSlugList(config.image_web_fallback_model_slugs),
     image_settle_enabled: Boolean(config.image_settle_enabled !== false),
     image_check_before_hit_enabled: Boolean(config.image_check_before_hit_enabled !== false),
     image_remove_conversation_after_result: Boolean(config.image_remove_conversation_after_result),
@@ -302,6 +324,9 @@ type SettingsStore = {
   setImageRetentionDays: (value: string) => void;
   setImagePollTimeoutSecs: (value: string) => void;
   setImageAccountConcurrency: (value: string) => void;
+  setImageWebModelSlug: (value: string) => void;
+  setImageWebFallbackEnabled: (value: boolean) => void;
+  setImageWebFallbackModelSlugsText: (value: string) => void;
   setImageSettleEnabled: (value: boolean) => void;
   setImageCheckBeforeHitEnabled: (value: boolean) => void;
   setImageRemoveConversationAfterResult: (value: boolean) => void;
@@ -451,6 +476,9 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         image_retention_days: Math.max(1, Number(config.image_retention_days) || 30),
         image_poll_timeout_secs: Math.max(1, Number(config.image_poll_timeout_secs) || 120),
         image_account_concurrency: Math.max(1, Number(config.image_account_concurrency) || 3),
+        image_web_model_slug: String(config.image_web_model_slug || DEFAULT_IMAGE_WEB_MODEL_SLUG).trim() || DEFAULT_IMAGE_WEB_MODEL_SLUG,
+        image_web_fallback_enabled: Boolean(config.image_web_fallback_enabled !== false),
+        image_web_fallback_model_slugs: normalizeModelSlugList(config.image_web_fallback_model_slugs),
         image_settle_enabled: Boolean(config.image_settle_enabled !== false),
         image_check_before_hit_enabled: Boolean(config.image_check_before_hit_enabled !== false),
         image_remove_conversation_after_result: Boolean(config.image_remove_conversation_after_result),
@@ -555,6 +583,18 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   setImageAccountConcurrency: (value) => {
     set((state) => state.config ? { config: { ...state.config, image_account_concurrency: value } } : {});
+  },
+
+  setImageWebModelSlug: (value) => {
+    set((state) => state.config ? { config: { ...state.config, image_web_model_slug: value } } : {});
+  },
+
+  setImageWebFallbackEnabled: (value) => {
+    set((state) => state.config ? { config: { ...state.config, image_web_fallback_enabled: value } } : {});
+  },
+
+  setImageWebFallbackModelSlugsText: (value) => {
+    set((state) => state.config ? { config: { ...state.config, image_web_fallback_model_slugs: normalizeModelSlugList(value) } } : {});
   },
 
   setImageSettleEnabled: (value) => {

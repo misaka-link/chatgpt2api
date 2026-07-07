@@ -4,6 +4,7 @@ import copy
 from dataclasses import dataclass
 import json
 import os
+import re
 import sys
 from pathlib import Path
 import time
@@ -83,6 +84,10 @@ DEFAULT_THIRD_PARTY_APPS = {
     },
 }
 
+DEFAULT_IMAGE_WEB_MODEL_SLUG = "gpt-5-5-thinking"
+DEFAULT_IMAGE_WEB_FALLBACK_ENABLED = True
+DEFAULT_IMAGE_WEB_FALLBACK_MODEL_SLUGS = ["gpt-5-5", "gpt-5-3"]
+
 
 def _normalize_bool(value: object, default: bool = False) -> bool:
     if isinstance(value, str):
@@ -103,6 +108,28 @@ def _normalize_positive_int(value: object, default: int, minimum: int = 0) -> in
     except (OverflowError, TypeError, ValueError):
         normalized = default
     return max(minimum, normalized)
+
+
+def _normalize_model_slug(value: object, default: str) -> str:
+    normalized = str(value or "").strip()
+    return normalized or default
+
+
+def _normalize_model_slug_list(value: object, default: list[str]) -> list[str]:
+    if isinstance(value, str):
+        items = re.split(r"[\r\n,]+", value)
+    elif isinstance(value, list):
+        items = value
+    else:
+        items = default
+    normalized: list[str] = []
+    for item in items:
+        slug = str(item or "").strip()
+        if slug and slug not in normalized:
+            normalized.append(slug)
+    if normalized:
+        return normalized
+    return [str(item).strip() for item in default if str(item).strip()]
 
 
 def _normalize_backup_include(value: object) -> dict[str, bool]:
@@ -424,6 +451,21 @@ class ConfigStore:
             return 3
 
     @property
+    def image_web_model_slug(self) -> str:
+        return _normalize_model_slug(self.data.get("image_web_model_slug"), DEFAULT_IMAGE_WEB_MODEL_SLUG)
+
+    @property
+    def image_web_fallback_enabled(self) -> bool:
+        return _normalize_bool(self.data.get("image_web_fallback_enabled"), DEFAULT_IMAGE_WEB_FALLBACK_ENABLED)
+
+    @property
+    def image_web_fallback_model_slugs(self) -> list[str]:
+        return _normalize_model_slug_list(
+            self.data.get("image_web_fallback_model_slugs"),
+            DEFAULT_IMAGE_WEB_FALLBACK_MODEL_SLUGS,
+        )
+
+    @property
     def image_parallel_generation(self) -> bool:
         value = self.data.get("image_parallel_generation", True)
         if isinstance(value, str):
@@ -555,6 +597,9 @@ class ConfigStore:
         data["image_poll_interval_secs"] = self.image_poll_interval_secs
         data["image_poll_initial_wait_secs"] = self.image_poll_initial_wait_secs
         data["image_account_concurrency"] = self.image_account_concurrency
+        data["image_web_model_slug"] = self.image_web_model_slug
+        data["image_web_fallback_enabled"] = self.image_web_fallback_enabled
+        data["image_web_fallback_model_slugs"] = self.image_web_fallback_model_slugs
         data["image_parallel_generation"] = self.image_parallel_generation
         data["image_remove_conversation_after_result"] = self.image_remove_conversation_after_result
         data["auto_remove_invalid_accounts"] = self.auto_remove_invalid_accounts
@@ -616,6 +661,18 @@ class ConfigStore:
                     incoming_runtime["_existing_cf_cookies"] = previous_clearance.get("cf_cookies")
                     incoming_runtime["_existing_cf_clearance"] = previous_clearance.get("cf_clearance")
             next_data["proxy_runtime"] = _normalize_proxy_runtime_settings(incoming_runtime)
+        next_data["image_web_model_slug"] = _normalize_model_slug(
+            next_data.get("image_web_model_slug"),
+            DEFAULT_IMAGE_WEB_MODEL_SLUG,
+        )
+        next_data["image_web_fallback_enabled"] = _normalize_bool(
+            next_data.get("image_web_fallback_enabled"),
+            DEFAULT_IMAGE_WEB_FALLBACK_ENABLED,
+        )
+        next_data["image_web_fallback_model_slugs"] = _normalize_model_slug_list(
+            next_data.get("image_web_fallback_model_slugs"),
+            DEFAULT_IMAGE_WEB_FALLBACK_MODEL_SLUGS,
+        )
         next_data.pop("backup_state", None)
         self.data = next_data
         self._save()

@@ -15,6 +15,13 @@ import { testProxy, type ProxyTestResult } from "@/lib/api";
 
 import { useSettingsStore } from "../store";
 
+const IMAGE_WEB_MODEL_PRESETS = [
+  { value: "gpt-5-5-thinking", label: "gpt-5-5-thinking", description: "推荐" },
+  { value: "gpt-5-5", label: "gpt-5-5", description: "新版" },
+  { value: "gpt-5-3", label: "gpt-5-3", description: "旧版" },
+] as const;
+const IMAGE_WEB_MODEL_CUSTOM_VALUE = "__custom__";
+
 export function ConfigCard() {
   const [isTestingProxy, setIsTestingProxy] = useState(false);
   const [proxyTestResult, setProxyTestResult] = useState<ProxyTestResult | null>(null);
@@ -26,6 +33,9 @@ export function ConfigCard() {
   const setImageRetentionDays = useSettingsStore((state) => state.setImageRetentionDays);
   const setImagePollTimeoutSecs = useSettingsStore((state) => state.setImagePollTimeoutSecs);
   const setImageAccountConcurrency = useSettingsStore((state) => state.setImageAccountConcurrency);
+  const setImageWebModelSlug = useSettingsStore((state) => state.setImageWebModelSlug);
+  const setImageWebFallbackEnabled = useSettingsStore((state) => state.setImageWebFallbackEnabled);
+  const setImageWebFallbackModelSlugsText = useSettingsStore((state) => state.setImageWebFallbackModelSlugsText);
   const setImageSettleEnabled = useSettingsStore((state) => state.setImageSettleEnabled);
   const setImageRemoveConversationAfterResult = useSettingsStore((state) => state.setImageRemoveConversationAfterResult);
   const setImageSettleSecs = useSettingsStore((state) => state.setImageSettleSecs);
@@ -45,6 +55,11 @@ export function ConfigCard() {
   const isTestingImageStorage = useSettingsStore((state) => state.isTestingImageStorage);
   const isSyncingImageStorage = useSettingsStore((state) => state.isSyncingImageStorage);
   const saveConfig = useSettingsStore((state) => state.saveConfig);
+  const imageWebModelSlug = String(config?.image_web_model_slug || "gpt-5-5-thinking").trim() || "gpt-5-5-thinking";
+  const imageWebModelPresetValue = IMAGE_WEB_MODEL_PRESETS.some((item) => item.value === imageWebModelSlug)
+    ? imageWebModelSlug
+    : IMAGE_WEB_MODEL_CUSTOM_VALUE;
+  const imageWebFallbackModelsText = (config?.image_web_fallback_model_slugs || []).join("\n");
 
   const handleTestProxy = async () => {
     const candidate = String(config?.proxy || "").trim();
@@ -167,6 +182,39 @@ export function ConfigCard() {
             <p className="text-xs text-stone-500">单位秒，等待上游图片结果的最长时间。</p>
           </div>
           <div className="space-y-2">
+            <label className="text-sm text-stone-700">生图默认模型</label>
+            <Select
+              value={imageWebModelPresetValue}
+              onValueChange={(value) => {
+                if (value === IMAGE_WEB_MODEL_CUSTOM_VALUE) {
+                  return;
+                }
+                setImageWebModelSlug(value);
+              }}
+            >
+              <SelectTrigger className="h-10 rounded-xl border-stone-200 bg-white">
+                <SelectValue placeholder="选择内部模型" />
+              </SelectTrigger>
+              <SelectContent>
+                {IMAGE_WEB_MODEL_PRESETS.map((item) => (
+                  <SelectItem key={item.value} value={item.value}>
+                    {item.label}（{item.description}）
+                  </SelectItem>
+                ))}
+                <SelectItem value={IMAGE_WEB_MODEL_CUSTOM_VALUE}>自定义</SelectItem>
+              </SelectContent>
+            </Select>
+            {imageWebModelPresetValue === IMAGE_WEB_MODEL_CUSTOM_VALUE ? (
+              <Input
+                value={imageWebModelSlug}
+                onChange={(event) => setImageWebModelSlug(event.target.value)}
+                placeholder="输入自定义内部模型 slug"
+                className="h-10 rounded-xl border-stone-200 bg-white"
+              />
+            ) : null}
+            <p className="text-xs text-stone-500">仅作用于外部 `gpt-image-2` 的 ChatGPT Web `picture_v2` 生图链路。</p>
+          </div>
+          <div className="space-y-2">
             <label className="text-sm text-stone-700">单账号图片并发</label>
             <Input
               value={String(config?.image_account_concurrency || "")}
@@ -195,6 +243,23 @@ export function ConfigCard() {
               <span className="text-sm text-stone-700">图片二次确认机制</span>
             </div>
             <p className="text-xs text-stone-500">打开后能稍微提升获取图片的成功率。</p>
+          </div>
+          <div className="space-y-2 md:col-span-2">
+            <div className="flex items-center gap-3 rounded-xl border border-stone-200 bg-white px-4 py-3">
+              <Checkbox
+                checked={Boolean(config?.image_web_fallback_enabled !== false)}
+                onCheckedChange={(checked) => setImageWebFallbackEnabled(Boolean(checked))}
+              />
+              <span className="text-sm text-stone-700">生图失败后轮询备用模型</span>
+            </div>
+            <Textarea
+              value={imageWebFallbackModelsText}
+              onChange={(event) => setImageWebFallbackModelSlugsText(event.target.value)}
+              placeholder={"gpt-5-5\ngpt-5-3"}
+              className="min-h-24 rounded-xl border-stone-200 bg-white font-mono text-xs shadow-none disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={!config?.image_web_fallback_enabled}
+            />
+            <p className="text-xs text-stone-500">先使用上面的默认模型；遇到无图、轮询超时或模型不可用时，按这里的顺序切换。支持一行一个 slug，也支持自定义。</p>
           </div>
           <div className="space-y-2">
             <div className="flex items-center gap-3 rounded-xl border border-stone-200 bg-white px-4 py-3">

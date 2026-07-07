@@ -108,7 +108,31 @@ class FakeSession:
 
 
 class SentinelTokenTests(unittest.TestCase):
-    def test_build_sentinel_token_returns_so_token_when_present(self) -> None:
+    def test_build_sentinel_token_returns_sdk_backed_headers(self) -> None:
+        class Runtime:
+            sdk_bundle = type("SdkBundle", (), {"version": "20260219f9f6"})()
+
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, tuple[Any, ...]]] = []
+
+            def call(self, name: str, *args, **kwargs):
+                self.calls.append((name, args))
+                if name == "getRequirementsToken":
+                    return "REQ"
+                if name == "makeHandle":
+                    return "handle-1"
+                if name == "attachRequirements":
+                    return None
+                if name == "getEnforcementToken":
+                    return "POW"
+                if name == "runTurnstile":
+                    return "turnstile-token"
+                if name == "runCollector":
+                    return "collector-ok"
+                if name == "runSnapshot":
+                    return "snapshot-b64"
+                raise AssertionError(f"unexpected runtime call: {name}")
+
         class Session:
             def post(self, *args, **kwargs):
                 return FakeResponse(
@@ -116,11 +140,17 @@ class SentinelTokenTests(unittest.TestCase):
                     payload={
                         "token": "challenge-token",
                         "proofofwork": {"required": False},
-                        "so_token": "so-token",
+                        "turnstile": {"required": True, "dx": "turnstile-dx"},
+                        "so": {
+                            "required": True,
+                            "collector_dx": "collector-dx",
+                            "snapshot_dx": "snapshot-dx",
+                        },
                     },
                 )
 
-        with patch.object(sentinel_utils.SentinelTokenGenerator, "generate_requirements_token", return_value="REQ"):
+        runtime = Runtime()
+        with patch.object(sentinel_utils._runtime_pool, "get_runtime", return_value=runtime):
             sentinel_value, oai_sc_value, so_token = sentinel_utils.build_sentinel_token(
                 Session(),
                 "device-1",
@@ -129,17 +159,56 @@ class SentinelTokenTests(unittest.TestCase):
 
         self.assertEqual(
             json.loads(sentinel_value),
-            {"p": "REQ", "t": "", "c": "challenge-token", "id": "device-1", "flow": "password_verify"},
+            {
+                "p": "POW",
+                "t": "turnstile-token",
+                "c": "challenge-token",
+                "id": "device-1",
+                "flow": "password_verify",
+            },
         )
         self.assertEqual(oai_sc_value, "0challenge-token")
-        self.assertEqual(so_token, "so-token")
+        self.assertEqual(
+            json.loads(so_token),
+            {"so": "snapshot-b64", "c": "challenge-token", "id": "device-1", "flow": "password_verify"},
+        )
 
-    def test_build_sentinel_token_fallback_keeps_three_tuple_shape(self) -> None:
+    def test_build_sentinel_token_omits_so_token_when_snapshot_generation_fails(self) -> None:
+        class Runtime:
+            sdk_bundle = type("SdkBundle", (), {"version": "20260219f9f6"})()
+
+            def call(self, name: str, *args, **kwargs):
+                if name == "getRequirementsToken":
+                    return "REQ"
+                if name == "makeHandle":
+                    return "handle-1"
+                if name == "attachRequirements":
+                    return None
+                if name == "getEnforcementToken":
+                    return "POW"
+                if name == "runTurnstile":
+                    return ""
+                if name == "runCollector":
+                    raise RuntimeError("collector failed")
+                if name == "runSnapshot":
+                    return ""
+                raise AssertionError(f"unexpected runtime call: {name}")
+
         class Session:
             def post(self, *args, **kwargs):
-                return FakeResponse(status_code=200, text="not-json", json_error=ValueError("bad json"))
+                return FakeResponse(
+                    status_code=200,
+                    payload={
+                        "token": "challenge-token",
+                        "proofofwork": {"required": False},
+                        "so": {"required": True, "collector_dx": "collector-dx", "snapshot_dx": "snapshot-dx"},
+                    },
+                )
 
-        with patch.object(sentinel_utils.SentinelTokenGenerator, "generate_requirements_token", return_value="REQ"):
+        with patch.object(sentinel_utils._runtime_pool, "get_runtime", return_value=Runtime()), patch.object(
+            sentinel_utils.logger,
+            "warning",
+        ) as warning_mock:
             sentinel_value, oai_sc_value, so_token = sentinel_utils.build_sentinel_token(
                 Session(),
                 "device-1",
@@ -148,10 +217,11 @@ class SentinelTokenTests(unittest.TestCase):
 
         self.assertEqual(
             json.loads(sentinel_value),
-            {"p": "REQ", "t": "", "c": "", "id": "device-1", "flow": "password_verify"},
+            {"p": "POW", "t": "", "c": "challenge-token", "id": "device-1", "flow": "password_verify"},
         )
-        self.assertEqual(oai_sc_value, "")
+        self.assertEqual(oai_sc_value, "0challenge-token")
         self.assertEqual(so_token, "")
+        self.assertTrue(warning_mock.called)
 
 
 class AccountPasswordLoginTests(unittest.TestCase):

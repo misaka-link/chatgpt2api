@@ -6,7 +6,7 @@ import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Iterable, Iterator
 
 import tiktoken
@@ -17,6 +17,7 @@ from services.image_storage_service import image_storage_service
 from services.openai_backend_api import ImageContentPolicyError, ImagePollTimeoutError, OpenAIBackendAPI
 from utils.helper import (
     IMAGE_MODELS,
+    UpstreamHTTPError,
     extract_image_from_message_content,
     is_codex_image_model,
     is_supported_image_model,
@@ -121,6 +122,20 @@ REFERENCED_IMAGE_IDS_RE = re.compile(r'"referenced_image_ids"\s*:\s*\[([^\]]+)\]
 TOOL_PARAMS_JSON_RE = re.compile(
     r'\{\s*"size"\s*:\s*"\d+x\d+"\s*,\s*"n"\s*:\s*\d+\s*\}'
 )
+IMAGE_MODEL_UNAVAILABLE_KEYWORDS = (
+    "model unavailable",
+    "model not available",
+    "no longer available",
+    "does not exist",
+    "doesn't exist",
+    "invalid model",
+    "unsupported model",
+    "model_slug",
+    "unknown model",
+    "not found",
+    "disabled",
+)
+FALLBACK_IMAGE_ERROR_CODES = {"no_image_generated", "upstream_text_reply", "model_unavailable"}
 
 
 def is_model_text_reply_instead_of_image(message: str) -> bool:
@@ -142,6 +157,52 @@ def is_model_text_reply_instead_of_image(message: str) -> bool:
     if TOOL_PARAMS_JSON_RE.search(message):
         return True
     return False
+
+
+def is_image_model_unavailable_error(error: object) -> bool:
+    if isinstance(error, UpstreamHTTPError):
+        if isinstance(error.body, (dict, list)):
+            try:
+                text = json.dumps(error.body, ensure_ascii=False)
+            except (TypeError, ValueError):
+                text = repr(error.body)
+        else:
+            text = str(error.body or error)
+    else:
+        text = str(error or "")
+    lowered = text.lower()
+    if "model" not in lowered:
+        return False
+    return any(keyword in lowered for keyword in IMAGE_MODEL_UNAVAILABLE_KEYWORDS)
+
+
+def should_retry_with_fallback_image_model(error: Exception) -> bool:
+    if isinstance(error, ImagePollTimeoutError):
+        return True
+    if isinstance(error, ImageGenerationError):
+        if error.code in FALLBACK_IMAGE_ERROR_CODES:
+            return True
+        if is_model_text_reply_instead_of_image(str(error)):
+            return True
+        return is_image_model_unavailable_error(str(error))
+    return is_image_model_unavailable_error(error)
+
+
+def image_model_slug_candidates(model: str) -> list[str]:
+    _, base_model = split_image_model(model)
+    if base_model == "gpt-image-2":
+        candidates = [config.image_web_model_slug]
+        if config.image_web_fallback_enabled:
+            candidates.extend(config.image_web_fallback_model_slugs)
+        normalized: list[str] = []
+        for item in candidates:
+            slug = str(item or "").strip()
+            if slug and slug not in normalized:
+                normalized.append(slug)
+        return normalized or [config.image_web_model_slug]
+    if base_model:
+        return [base_model]
+    return ["auto"]
 
 
 def encode_images(images: Iterable[tuple[bytes, str, str]]) -> list[str]:
@@ -307,6 +368,7 @@ class ConversationRequest:
     base_url: str | None = None
     message_as_error: bool = False
     progress_callback: Any = None  # Callable[[str], None] | None
+    image_model_slug_override: str = ""
 
 
 @dataclass
@@ -658,6 +720,7 @@ def conversation_events(
     size: str | None = None,
     quality: str = "auto",
     thinking_effort: str = "",
+    image_model_slug_override: str = "",
 ) -> Iterator[dict[str, Any]]:
     normalized = normalize_messages(messages or ([{"role": "user", "content": prompt}] if prompt else []))
     image_model = is_supported_image_model(model)
@@ -671,6 +734,7 @@ def conversation_events(
         images=images if image_model else None,
         system_hints=["picture_v2"] if image_model else None,
         thinking_effort=thinking_effort if not image_model else "",
+        image_model_slug_override=image_model_slug_override if image_model else "",
     )
     yield from iter_conversation_payloads(payloads, history_text, history_messages)
 
@@ -808,6 +872,7 @@ def stream_image_outputs(
             images=request.images or [],
             size=request.size,
             quality=request.quality,
+            image_model_slug_override=request.image_model_slug_override,
     ):
         last = event
         if event.get("type") == "conversation.delta":
@@ -1247,10 +1312,11 @@ def stream_codex_image_outputs(
     raise ImageGenerationError("No image result found in response")
 
 
-def _generate_single_image(
+def _generate_single_image_with_model_slug(
         request: ConversationRequest,
         index: int,
         total: int,
+        image_model_slug: str,
 ) -> list[ImageOutput]:
     """为单张图片执行生成逻辑（含重试），返回结果列表。
 
@@ -1303,9 +1369,10 @@ def _generate_single_image(
             backend = OpenAIBackendAPI(access_token=token)
             if request.progress_callback:
                 backend.progress_callback = request.progress_callback
+            active_request = replace(request, image_model_slug_override=image_model_slug)
             stream_fn = stream_codex_image_outputs if is_codex_image_model(request.model) else stream_image_outputs
             outputs: list[ImageOutput] = []
-            for output in stream_fn(backend, request, index, total):
+            for output in stream_fn(backend, active_request, index, total):
                 if account_email and not output.account_email:
                     output.account_email = account_email
                 if output.kind == "message" and request.message_as_error:
@@ -1416,6 +1483,15 @@ def _generate_single_image(
                     account_email=account_email,
                     conversation_id=getattr(exc, "conversation_id", ""),
                 ) from exc
+            if is_image_model_unavailable_error(error_text):
+                raise ImageGenerationError(
+                    error_text or "The configured upstream image model is unavailable.",
+                    status_code=502,
+                    error_type="server_error",
+                    code="model_unavailable",
+                    account_email=account_email,
+                    conversation_id=getattr(exc, "conversation_id", ""),
+                ) from exc
             logger.warning({
                 "event": "image_stream_generation_error",
                 "request_token": token,
@@ -1434,6 +1510,15 @@ def _generate_single_image(
                 "error": last_error,
                 "index": index,
             })
+            if not emitted_for_token and is_image_model_unavailable_error(exc):
+                raise ImageGenerationError(
+                    last_error or "The configured upstream image model is unavailable.",
+                    status_code=502,
+                    error_type="server_error",
+                    code="model_unavailable",
+                    account_email=account_email,
+                    conversation_id="",
+                ) from exc
             if not emitted_for_token and is_token_invalid_error(last_error):
                 refreshed_token = account_service.refresh_access_token(token, force=True, event="image_stream")
                 if refreshed_token and refreshed_token != token:
@@ -1475,6 +1560,45 @@ def _generate_single_image(
         finally:
             if backend is not None:
                 backend.close()
+
+
+def _generate_single_image(
+        request: ConversationRequest,
+        index: int,
+        total: int,
+) -> list[ImageOutput]:
+    candidate_slugs = image_model_slug_candidates(request.model)
+    last_error: Exception | None = None
+    for attempt_index, image_model_slug in enumerate(candidate_slugs, start=1):
+        logger.info({
+            "event": "image_model_slug_attempt",
+            "model": request.model,
+            "image_model_slug": image_model_slug,
+            "attempt_index": attempt_index,
+            "attempt_total": len(candidate_slugs),
+            "index": index,
+            "total": total,
+        })
+        try:
+            return _generate_single_image_with_model_slug(request, index, total, image_model_slug)
+        except Exception as exc:
+            last_error = exc
+            if attempt_index >= len(candidate_slugs) or not should_retry_with_fallback_image_model(exc):
+                raise
+            logger.warning({
+                "event": "image_model_slug_fallback",
+                "model": request.model,
+                "failed_image_model_slug": image_model_slug,
+                "next_image_model_slug": candidate_slugs[attempt_index],
+                "attempt_index": attempt_index,
+                "attempt_total": len(candidate_slugs),
+                "index": index,
+                "error_type": exc.__class__.__name__,
+                "error": str(exc)[:300],
+            })
+    if last_error is not None:
+        raise last_error
+    raise ImageGenerationError("image generation failed")
 
 
 def stream_image_outputs_with_pool(request: ConversationRequest) -> Iterator[ImageOutput]:
