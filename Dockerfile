@@ -30,10 +30,12 @@ WORKDIR /app
 # - git: Git 存储后端需要
 # - libpq-dev: PostgreSQL 客户端库
 # - gcc: 编译 psycopg2-binary 需要
+# - libc6-dev: 编译 quickjs 扩展需要标准 C 头文件
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     libpq-dev \
     gcc \
+    libc6-dev \
     openssl \
     && rm -rf /var/lib/apt/lists/*
 
