@@ -322,7 +322,11 @@ export function RegisterCard() {
                               />
                             </div>
                           ) : null}
-                          {learningMode ? <YydsLearningPanel provider={type} providerRef={providerRef} /> : null}
+                          {learningMode ? (
+                            <div className="md:col-span-2">
+                              <YydsLearningPanel provider={type} providerRef={providerRef} />
+                            </div>
+                          ) : null}
                         </>
                       ) : null}
                       {type === "outlook_token" ? (
