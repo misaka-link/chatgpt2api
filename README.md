@@ -26,6 +26,7 @@ docker compose up -d
 ```
 
 启动前请先在 `config.json` 中设置 `auth-key`，也可以在 `docker-compose.yml` 中通过 `CHATGPT2API_AUTH_KEY` 覆盖。
+如果是拉取源码后重新构建本地镜像，遇到新增 Python 依赖的更新时请执行 `docker compose up -d --build`。
 
 - Web 面板：`http://localhost:3000`
 - API 地址：`http://localhost:3000/v1`
