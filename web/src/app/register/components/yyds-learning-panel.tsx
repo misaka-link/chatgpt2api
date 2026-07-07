@@ -466,20 +466,20 @@ export function YydsLearningPanel({
 
   return (
     <div className="space-y-4 rounded-2xl border border-stone-200 bg-stone-50/70 p-4">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="space-y-1">
-          <div className="flex items-center gap-2 text-sm font-semibold text-stone-800">
-            <ShieldCheck className="size-4 text-emerald-600" />
-            YYDSMail 学习模式列表
-          </div>
-          <p className="text-xs leading-5 text-stone-500">
-            黑名单和信任列表都按域名统计。输入完整邮箱时会自动提取域名部分，修改后立即生效，不需要再点上面的“保存配置”。
-          </p>
+      <div className="space-y-2">
+        <div className="flex justify-end">
+          <Button type="button" variant="outline" className="h-8 rounded-lg px-3 text-xs" onClick={() => void handleReload()} disabled={isLoading || dialogPending}>
+            {isLoading ? <LoaderCircle className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
+            刷新
+          </Button>
         </div>
-        <Button type="button" variant="outline" className="h-8 rounded-lg px-3 text-xs" onClick={() => void handleReload()} disabled={isLoading || dialogPending}>
-          {isLoading ? <LoaderCircle className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
-          刷新
-        </Button>
+        <div className="flex items-center gap-2 text-sm font-semibold text-stone-800">
+          <ShieldCheck className="size-4 text-emerald-600" />
+          YYDSMail 学习模式列表
+        </div>
+        <p className="text-xs leading-5 text-stone-500">
+          黑名单和信任列表都按域名统计。输入完整邮箱时会自动提取域名部分，修改后立即生效，不需要再点上面的“保存配置”。
+        </p>
       </div>
 
       {isLoading && !reputation ? (
