@@ -22,7 +22,8 @@ ARG TARGETARCH
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    UV_LINK_MODE=copy
+    UV_LINK_MODE=copy \
+    TZ=Asia/Shanghai
 
 WORKDIR /app
 
@@ -37,6 +38,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     libc6-dev \
     openssl \
+    tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir uv

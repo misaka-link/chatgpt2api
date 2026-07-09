@@ -38,6 +38,7 @@ import {
   type SettingsConfig,
   type ThirdPartyAppsSettings,
 } from "@/lib/api";
+import { DEFAULT_DISPLAY_TIMEZONE, normalizeDisplayTimezone } from "@/lib/display-time";
 
 export const PAGE_SIZE_OPTIONS = ["50", "100", "200"] as const;
 
@@ -193,6 +194,7 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
   return {
     ...config,
     refresh_account_interval_minute: Number(config.refresh_account_interval_minute || 5),
+    display_timezone: normalizeDisplayTimezone(config.display_timezone || DEFAULT_DISPLAY_TIMEZONE),
     image_retention_days: Number(config.image_retention_days || 30),
     image_poll_timeout_secs: Number(config.image_poll_timeout_secs || 120),
     image_stream_hard_timeout_secs: Number(config.image_stream_hard_timeout_secs || config.image_poll_timeout_secs || 120),
@@ -322,6 +324,7 @@ type SettingsStore = {
   removeBackup: (key: string) => Promise<void>;
   testBackup: () => Promise<void>;
   setRefreshAccountIntervalMinute: (value: string) => void;
+  setDisplayTimezone: (value: string) => void;
   setImageRetentionDays: (value: string) => void;
   setImagePollTimeoutSecs: (value: string) => void;
   setImageStreamHardTimeoutSecs: (value: string) => void;
@@ -475,6 +478,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       const data = await updateSettingsConfig({
         ...config,
         refresh_account_interval_minute: Math.max(1, Number(config.refresh_account_interval_minute) || 1),
+        display_timezone: normalizeDisplayTimezone(config.display_timezone || DEFAULT_DISPLAY_TIMEZONE),
         image_retention_days: Math.max(1, Number(config.image_retention_days) || 30),
         image_poll_timeout_secs: Math.max(1, Number(config.image_poll_timeout_secs) || 120),
         image_stream_hard_timeout_secs: Math.max(
@@ -574,6 +578,20 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         config: {
           ...state.config,
           refresh_account_interval_minute: value,
+        },
+      };
+    });
+  },
+
+  setDisplayTimezone: (value) => {
+    set((state) => {
+      if (!state.config) {
+        return {};
+      }
+      return {
+        config: {
+          ...state.config,
+          display_timezone: value,
         },
       };
     });

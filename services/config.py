@@ -16,6 +16,8 @@ DATA_DIR = BASE_DIR / "data"
 CONFIG_FILE = BASE_DIR / "config.json"
 VERSION_FILE = BASE_DIR / "VERSION"
 BACKUP_STATE_FILE = DATA_DIR / "backup_state.json"
+DEFAULT_DISPLAY_TIMEZONE = "Asia/Shanghai"
+DISPLAY_TIMEZONE_PATTERN = re.compile(r"^[A-Za-z0-9_+\-./]{1,80}$")
 
 DEFAULT_BACKUP_INCLUDE = {
     "config": True,
@@ -108,6 +110,13 @@ def _normalize_positive_int(value: object, default: int, minimum: int = 0) -> in
     except (OverflowError, TypeError, ValueError):
         normalized = default
     return max(minimum, normalized)
+
+
+def _normalize_display_timezone(value: object) -> str:
+    timezone_name = str(value or DEFAULT_DISPLAY_TIMEZONE).strip()
+    if not timezone_name or not DISPLAY_TIMEZONE_PATTERN.fullmatch(timezone_name):
+        return DEFAULT_DISPLAY_TIMEZONE
+    return timezone_name
 
 
 def _normalize_model_slug(value: object, default: str) -> str:
@@ -420,6 +429,10 @@ class ConfigStore:
             return 30
 
     @property
+    def display_timezone(self) -> str:
+        return _normalize_display_timezone(self.data.get("display_timezone"))
+
+    @property
     def image_poll_timeout_secs(self) -> int:
         try:
             return max(1, int(self.data.get("image_poll_timeout_secs", 120)))
@@ -600,6 +613,7 @@ class ConfigStore:
     def get(self) -> dict[str, object]:
         data = dict(self.data)
         data["refresh_account_interval_minute"] = self.refresh_account_interval_minute
+        data["display_timezone"] = self.display_timezone
         data["image_retention_days"] = self.image_retention_days
         data["image_poll_timeout_secs"] = self.image_poll_timeout_secs
         data["image_stream_hard_timeout_secs"] = self.image_stream_hard_timeout_secs
@@ -650,6 +664,7 @@ class ConfigStore:
     def update(self, data: dict[str, object]) -> dict[str, object]:
         next_data = dict(self.data)
         next_data.update(dict(data or {}))
+        next_data["display_timezone"] = _normalize_display_timezone(next_data.get("display_timezone"))
         if "backup" in next_data:
             next_data["backup"] = _normalize_backup_settings(next_data.get("backup"))
         if "image_storage" in next_data:

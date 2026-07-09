@@ -27,6 +27,7 @@ docker compose up -d
 
 启动前请先在 `config.json` 中设置 `auth-key`，也可以在 `docker-compose.yml` 中通过 `CHATGPT2API_AUTH_KEY` 覆盖。
 如果是拉取源码后重新构建本地镜像，遇到新增 Python 依赖的更新时请执行 `docker compose up -d --build`。
+默认容器时区为 `Asia/Shanghai`。后台页面新增“显示时区”配置，默认也是 `Asia/Shanghai`，仅影响日志、号池、图片记录等时间展示，不改变内部业务逻辑和上游请求时区。
 
 - Web 面板：`http://localhost:3000`
 - API 地址：`http://localhost:3000/v1`
@@ -80,6 +81,8 @@ docker-compose down
 docker-compose up -d
 
 ```
+
+前端版本更新弹窗会从当前仓库的 `VERSION` 和 `CHANGELOG.md` 读取最新版本号与更新历史。
 
 ### 存储后端配置
 

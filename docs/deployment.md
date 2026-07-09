@@ -33,7 +33,7 @@ git --version
 适合不需要 WARP / FlareSolverr 清障的场景。
 
 ```bash
-git clone git@github.com:basketikun/chatgpt2api.git
+git clone git@github.com:misaka-link/chatgpt2api.git
 cd chatgpt2api
 ```
 
@@ -49,6 +49,8 @@ environment:
 ```bash
 docker compose up -d
 ```
+
+默认容器 `TZ` 为 `Asia/Shanghai`。后台页面的“显示时区”默认也为 `Asia/Shanghai`，可在设置页修改；该配置只影响时间展示，不改变服务内部业务逻辑。
 
 访问：
 
@@ -140,7 +142,7 @@ docker compose -f docker-compose.warp.yml down
 后端：
 
 ```bash
-git clone git@github.com:basketikun/chatgpt2api.git
+git clone git@github.com:misaka-link/chatgpt2api.git
 cd chatgpt2api
 uv sync
 uv run main.py

@@ -29,7 +29,9 @@ import {
   type Model,
   type ImageTask,
 } from "@/lib/api";
+import { formatDisplayShortDateTime } from "@/lib/display-time";
 import { useAuthGuard } from "@/lib/use-auth-guard";
+import { useDisplayTimezone } from "@/lib/use-display-timezone";
 import { useSettingsStore } from "@/app/settings/store";
 import {
   clearImageConversations,
@@ -102,17 +104,8 @@ function buildConversationTitle(prompt: string) {
   return `${trimmed.slice(0, 12)}...`;
 }
 
-function formatConversationTime(value: string) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return "";
-  }
-  return new Intl.DateTimeFormat("zh-CN", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(date);
+function formatConversationTime(value: string, timezone: string) {
+  return formatDisplayShortDateTime(value, timezone, "");
 }
 
 function formatAvailableQuota(accounts: Account[]) {
@@ -445,6 +438,7 @@ async function recoverConversationHistory(items: ImageConversation[]) {
 
 
 function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
+  const displayTimezone = useDisplayTimezone();
   const didLoadQuotaRef = useRef(false);
   const conversationsRef = useRef<ImageConversation[]>([]);
   const loadCancelledRef = useRef(false);
@@ -1622,7 +1616,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
             onSelectConversation={setSelectedConversationId}
             onDeleteConversation={openDeleteConversationConfirm}
             onRenameConversation={handleRenameConversation}
-            formatConversationTime={formatConversationTime}
+            formatConversationTime={(value) => formatConversationTime(value, displayTimezone)}
           />
         </div>
 
@@ -1650,7 +1644,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
                 }}
                 onDeleteConversation={openDeleteConversationConfirm}
                 onRenameConversation={handleRenameConversation}
-                formatConversationTime={formatConversationTime}
+                formatConversationTime={(value) => formatConversationTime(value, displayTimezone)}
                 hideActionButtons
               />
             </div>
@@ -1702,7 +1696,7 @@ function ImagePageContent({ isAdmin }: { isAdmin: boolean }) {
                 onRetryImage={handleRetryImage}
                 onTimeoutRetryContinue={handleTimeoutRetryContinue}
                 onDismissErrors={handleDismissErrors}
-                formatConversationTime={formatConversationTime}
+                formatConversationTime={(value) => formatConversationTime(value, displayTimezone)}
               />
             </div>
 

@@ -17,6 +17,7 @@ from services.log_service import (
     LOG_TYPE_ACCOUNT,
     log_service,
 )
+from services.time_utils import utc_now_iso
 from services.storage.base import StorageBackend
 from utils.helper import anonymize_token
 
@@ -114,8 +115,7 @@ class AccountService:
             ts = int(value)
         except (TypeError, ValueError):
             return ""
-        tz = timezone(timedelta(hours=8))
-        return datetime.fromtimestamp(ts, tz=timezone.utc).astimezone(tz).isoformat()
+        return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
 
     def _load_accounts(self) -> dict[str, dict]:
         accounts = self.storage.load_accounts()
@@ -1027,7 +1027,7 @@ class AccountService:
             if current is None:
                 return
             next_item = dict(current)
-            next_item["last_used_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            next_item["last_used_at"] = utc_now_iso()
             account = self._normalize_account(next_item)
             if account is None:
                 return
@@ -1293,7 +1293,7 @@ class AccountService:
             if current is None:
                 return None
             next_item = dict(current)
-            next_item["last_used_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            next_item["last_used_at"] = utc_now_iso()
             image_quota_unknown = bool(next_item.get("image_quota_unknown"))
             if success:
                 next_item["success"] = int(next_item.get("success") or 0) + 1

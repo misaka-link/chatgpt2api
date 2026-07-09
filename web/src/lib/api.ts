@@ -155,6 +155,7 @@ export type ThirdPartyAppsSettings = {
 export type SettingsConfig = {
   proxy: string;
   base_url?: string;
+  display_timezone?: string;
   image_web_model_slug?: string;
   image_web_fallback_enabled?: boolean;
   image_web_fallback_model_slugs?: string[];
@@ -611,6 +612,10 @@ export async function resumeImagePoll(taskId: string, extraTimeoutSecs = 30) {
 
 export async function fetchSettingsConfig() {
   return httpRequest<{ config: SettingsConfig }>("/api/settings");
+}
+
+export async function fetchDisplaySettings() {
+  return httpRequest<{ display_timezone: string }>("/api/display-settings");
 }
 
 export async function updateSettingsConfig(settings: SettingsConfig) {

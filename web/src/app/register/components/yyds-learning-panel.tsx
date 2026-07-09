@@ -27,6 +27,8 @@ import {
   upsertRegisterReputationBlacklistedDomain,
   upsertRegisterReputationDomain,
 } from "@/lib/api";
+import { formatDisplayShortDateTime } from "@/lib/display-time";
+import { useDisplayTimezone } from "@/lib/use-display-timezone";
 
 type BlacklistDialogState = {
   open: boolean;
@@ -57,18 +59,8 @@ const EMPTY_DOMAIN_DIALOG: DomainDialogState = {
 const CLEAR_BLACKLIST_PENDING_KEY = "__clear-blacklisted-domains__";
 const CLEAR_TRUSTED_PENDING_KEY = "__clear-trusted-domains__";
 
-function formatTime(value: string) {
-  if (!value) return "-";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "-";
-  return new Intl.DateTimeFormat(undefined, {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  }).format(date);
+function formatTime(value: string, timezone: string) {
+  return formatDisplayShortDateTime(value, timezone, "-");
 }
 
 function BlacklistDialog({
@@ -181,12 +173,14 @@ function BlacklistRows({
   items,
   pendingKey,
   disabled,
+  displayTimezone,
   onEdit,
   onDelete,
 }: {
   items: RegisterReputationBlacklistedDomain[];
   pendingKey: string;
   disabled: boolean;
+  displayTimezone: string;
   onEdit: (item: RegisterReputationBlacklistedDomain) => void;
   onDelete: (item: RegisterReputationBlacklistedDomain) => void;
 }) {
@@ -203,7 +197,7 @@ function BlacklistRows({
               <div className="min-w-0 space-y-2">
                 <div className="font-mono text-xs text-stone-700 break-all">{item.domain}</div>
                 <div className="text-xs text-stone-600 break-words">{item.reason || "-"}</div>
-                <div className="text-[11px] text-stone-500">更新时间：{formatTime(item.updated_at)}</div>
+                <div className="text-[11px] text-stone-500">更新时间：{formatTime(item.updated_at, displayTimezone)}</div>
               </div>
               <div className="flex w-full shrink-0 flex-wrap items-center gap-2 sm:w-auto sm:justify-end">
                 <Button type="button" variant="outline" className="h-8 flex-1 rounded-lg px-2 text-xs sm:flex-none" onClick={() => onEdit(item)} disabled={rowDisabled}>
@@ -227,12 +221,14 @@ function DomainRows({
   items,
   pendingKey,
   disabled,
+  displayTimezone,
   onEdit,
   onDelete,
 }: {
   items: RegisterReputationDomain[];
   pendingKey: string;
   disabled: boolean;
+  displayTimezone: string;
   onEdit: (item: RegisterReputationDomain) => void;
   onDelete: (item: RegisterReputationDomain) => void;
 }) {
@@ -256,7 +252,7 @@ function DomainRows({
                 <div className="text-xs text-stone-600">
                   成功 {item.success} / 硬失败 {item.hard_fail} / 软失败 {item.soft_fail}
                 </div>
-                <div className="text-[11px] text-stone-500">最近成功：{formatTime(item.last_success_at)}</div>
+                <div className="text-[11px] text-stone-500">最近成功：{formatTime(item.last_success_at, displayTimezone)}</div>
               </div>
               <div className="flex w-full shrink-0 flex-wrap items-center gap-2 sm:w-auto sm:justify-end">
                 <Button type="button" variant="outline" className="h-8 flex-1 rounded-lg px-2 text-xs sm:flex-none" onClick={() => onEdit(item)} disabled={rowDisabled}>
@@ -283,6 +279,7 @@ export function YydsLearningPanel({
   provider: string;
   providerRef: string;
 }) {
+  const displayTimezone = useDisplayTimezone();
   const [reputation, setReputation] = useState<RegisterReputation | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [pendingKey, setPendingKey] = useState("");
@@ -509,6 +506,7 @@ export function YydsLearningPanel({
               items={blacklistedItems}
               pendingKey={pendingKey}
               disabled={dialogPending}
+              displayTimezone={displayTimezone}
               onEdit={(item) =>
                 setBlacklistDialog({
                   open: true,
@@ -542,6 +540,7 @@ export function YydsLearningPanel({
               items={domainItems}
               pendingKey={pendingKey}
               disabled={dialogPending}
+              displayTimezone={displayTimezone}
               onEdit={(item) => setDomainDialog({ open: true, previousDomain: item.domain, domain: item.domain })}
               onDelete={(item) => void deleteDomain(item)}
             />

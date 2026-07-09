@@ -102,6 +102,7 @@ services:
       - ./data:/app/data
       - ./config.json:/app/config.json
     environment:
+      TZ: ${TZ:-Asia/Shanghai}
       STORAGE_BACKEND: ${STORAGE_BACKEND:-json}
       DATABASE_URL: ${DATABASE_URL:-}
       CHATGPT2API_AUTH_KEY: ${CHATGPT2API_AUTH_KEY:-}

@@ -12,6 +12,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Textarea } from "@/components/ui/textarea";
 import type { ImageStorageMode } from "@/lib/api";
 import { testProxy, type ProxyTestResult } from "@/lib/api";
+import { DEFAULT_DISPLAY_TIMEZONE, DISPLAY_TIMEZONE_CHOICES } from "@/lib/display-time";
 
 import { useSettingsStore } from "../store";
 
@@ -30,6 +31,7 @@ export function ConfigCard() {
   const isLoadingConfig = useSettingsStore((state) => state.isLoadingConfig);
   const isSavingConfig = useSettingsStore((state) => state.isSavingConfig);
   const setRefreshAccountIntervalMinute = useSettingsStore((state) => state.setRefreshAccountIntervalMinute);
+  const setDisplayTimezone = useSettingsStore((state) => state.setDisplayTimezone);
   const setImageRetentionDays = useSettingsStore((state) => state.setImageRetentionDays);
   const setImagePollTimeoutSecs = useSettingsStore((state) => state.setImagePollTimeoutSecs);
   const setImageStreamHardTimeoutSecs = useSettingsStore((state) => state.setImageStreamHardTimeoutSecs);
@@ -61,6 +63,12 @@ export function ConfigCard() {
     ? imageWebModelSlug
     : IMAGE_WEB_MODEL_CUSTOM_VALUE;
   const imageWebFallbackModelsText = (config?.image_web_fallback_model_slugs || []).join("\n");
+  const displayTimezone = String(config?.display_timezone || DEFAULT_DISPLAY_TIMEZONE);
+  const timezoneChoices: Array<{ value: string; label: string }> = DISPLAY_TIMEZONE_CHOICES.some(
+    (item) => item.value === displayTimezone,
+  )
+    ? [...DISPLAY_TIMEZONE_CHOICES]
+    : [{ value: displayTimezone, label: "当前自定义时区" }, ...DISPLAY_TIMEZONE_CHOICES];
 
   const handleTestProxy = async () => {
     const candidate = String(config?.proxy || "").trim();
@@ -111,6 +119,22 @@ export function ConfigCard() {
               className="h-10 rounded-xl border-stone-200 bg-white"
             />
             <p className="text-xs text-stone-500">单位分钟，控制账号自动刷新频率。</p>
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm text-stone-700">显示时区</label>
+            <Select value={displayTimezone} onValueChange={setDisplayTimezone}>
+              <SelectTrigger className="h-10 rounded-xl border-stone-200 bg-white">
+                <SelectValue placeholder={DEFAULT_DISPLAY_TIMEZONE} />
+              </SelectTrigger>
+              <SelectContent className="max-h-72">
+                {timezoneChoices.map((item) => (
+                  <SelectItem key={item.value} value={item.value}>
+                    {item.label} · {item.value}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-stone-500">只影响后台页面时间展示，不改变上游请求或内部业务逻辑。</p>
           </div>
           <div className="space-y-2">
             <label className="text-sm text-stone-700">全局代理</label>
