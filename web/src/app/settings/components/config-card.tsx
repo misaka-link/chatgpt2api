@@ -32,6 +32,7 @@ export function ConfigCard() {
   const setRefreshAccountIntervalMinute = useSettingsStore((state) => state.setRefreshAccountIntervalMinute);
   const setImageRetentionDays = useSettingsStore((state) => state.setImageRetentionDays);
   const setImagePollTimeoutSecs = useSettingsStore((state) => state.setImagePollTimeoutSecs);
+  const setImageStreamHardTimeoutSecs = useSettingsStore((state) => state.setImageStreamHardTimeoutSecs);
   const setImageAccountConcurrency = useSettingsStore((state) => state.setImageAccountConcurrency);
   const setImageWebModelSlug = useSettingsStore((state) => state.setImageWebModelSlug);
   const setImageWebFallbackEnabled = useSettingsStore((state) => state.setImageWebFallbackEnabled);
@@ -180,6 +181,16 @@ export function ConfigCard() {
               className="h-10 rounded-xl border-stone-200 bg-white"
             />
             <p className="text-xs text-stone-500">单位秒，等待上游图片结果的最长时间。</p>
+          </div>
+          <div className="space-y-2">
+            <label className="text-sm text-stone-700">图片 SSE 流硬超时</label>
+            <Input
+              value={String(config?.image_stream_hard_timeout_secs || "")}
+              onChange={(event) => setImageStreamHardTimeoutSecs(event.target.value)}
+              placeholder={String(config?.image_poll_timeout_secs || 120)}
+              className="h-10 rounded-xl border-stone-200 bg-white"
+            />
+            <p className="text-xs text-stone-500">单位秒，限制 picture_v2 生图 SSE 长连接的墙钟上限，避免上游挂流约 30 分钟才断开。</p>
           </div>
           <div className="space-y-2">
             <label className="text-sm text-stone-700">生图默认模型</label>

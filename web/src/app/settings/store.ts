@@ -195,6 +195,7 @@ function normalizeConfig(config: SettingsConfig): SettingsConfig {
     refresh_account_interval_minute: Number(config.refresh_account_interval_minute || 5),
     image_retention_days: Number(config.image_retention_days || 30),
     image_poll_timeout_secs: Number(config.image_poll_timeout_secs || 120),
+    image_stream_hard_timeout_secs: Number(config.image_stream_hard_timeout_secs || config.image_poll_timeout_secs || 120),
     image_account_concurrency: Number(config.image_account_concurrency || 3),
     image_web_model_slug: String(config.image_web_model_slug || DEFAULT_IMAGE_WEB_MODEL_SLUG).trim() || DEFAULT_IMAGE_WEB_MODEL_SLUG,
     image_web_fallback_enabled: Boolean(config.image_web_fallback_enabled !== false),
@@ -323,6 +324,7 @@ type SettingsStore = {
   setRefreshAccountIntervalMinute: (value: string) => void;
   setImageRetentionDays: (value: string) => void;
   setImagePollTimeoutSecs: (value: string) => void;
+  setImageStreamHardTimeoutSecs: (value: string) => void;
   setImageAccountConcurrency: (value: string) => void;
   setImageWebModelSlug: (value: string) => void;
   setImageWebFallbackEnabled: (value: boolean) => void;
@@ -475,6 +477,10 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
         refresh_account_interval_minute: Math.max(1, Number(config.refresh_account_interval_minute) || 1),
         image_retention_days: Math.max(1, Number(config.image_retention_days) || 30),
         image_poll_timeout_secs: Math.max(1, Number(config.image_poll_timeout_secs) || 120),
+        image_stream_hard_timeout_secs: Math.max(
+          1,
+          Number(config.image_stream_hard_timeout_secs) || Number(config.image_poll_timeout_secs) || 120,
+        ),
         image_account_concurrency: Math.max(1, Number(config.image_account_concurrency) || 3),
         image_web_model_slug: String(config.image_web_model_slug || DEFAULT_IMAGE_WEB_MODEL_SLUG).trim() || DEFAULT_IMAGE_WEB_MODEL_SLUG,
         image_web_fallback_enabled: Boolean(config.image_web_fallback_enabled !== false),
@@ -579,6 +585,10 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
   setImagePollTimeoutSecs: (value) => {
     set((state) => state.config ? { config: { ...state.config, image_poll_timeout_secs: value } } : {});
+  },
+
+  setImageStreamHardTimeoutSecs: (value) => {
+    set((state) => state.config ? { config: { ...state.config, image_stream_hard_timeout_secs: value } } : {});
   },
 
   setImageAccountConcurrency: (value) => {

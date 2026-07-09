@@ -4,7 +4,11 @@ import unittest
 from unittest import mock
 
 from services.config import config
-from services.openai_backend_api import ImagePollTimeoutError, OpenAIBackendAPI
+from services.openai_backend_api import (
+    ImagePollTimeoutError,
+    ImageStreamHardTimeoutError,
+    OpenAIBackendAPI,
+)
 from services.protocol import conversation
 
 
@@ -129,6 +133,47 @@ class ImageModelFallbackTests(unittest.TestCase):
 
         self.assertEqual(calls, ["gpt-5-5-thinking"])
         self.assertEqual(ctx.exception.code, "content_policy_violation")
+
+
+class ImageStreamHardTimeoutTests(unittest.TestCase):
+    def test_stream_picture_conversation_maps_hard_timeout_to_poll_timeout(self) -> None:
+        backend = OpenAIBackendAPI(access_token="token")
+        response = mock.Mock()
+
+        with (
+            mock.patch.dict(config.data, {"image_stream_hard_timeout_secs": 7}, clear=False),
+            mock.patch.object(backend, "_upload_image", return_value={"asset_pointer": "file-service://x"}),
+            mock.patch.object(backend, "_bootstrap"),
+            mock.patch.object(backend, "_get_chat_requirements", return_value=mock.Mock()),
+            mock.patch.object(backend, "_prepare_image_conversation", return_value="conduit"),
+            mock.patch.object(backend, "_start_image_generation", return_value=response),
+            mock.patch.object(
+                backend,
+                "_iter_sse_payloads_capped",
+                side_effect=ImageStreamHardTimeoutError("hard timeout"),
+            ) as capped,
+        ):
+            with self.assertRaises(ImagePollTimeoutError) as ctx:
+                list(backend._stream_picture_conversation("prompt", "gpt-image-2", []))
+
+        self.assertIn("SSE 流超时", str(ctx.exception))
+        self.assertTrue(getattr(ctx.exception, "sse_hard_timeout", False))
+        capped.assert_called_once_with(response, 7.0)
+        backend.close()
+
+    def test_iter_sse_payloads_capped_passes_through_payloads_before_close(self) -> None:
+        backend = OpenAIBackendAPI(access_token="token")
+        response = mock.Mock()
+
+        with mock.patch(
+            "services.openai_backend_api.iter_sse_payloads",
+            return_value=iter(["data: first", "data: second"]),
+        ):
+            payloads = list(backend._iter_sse_payloads_capped(response, 1.0))
+
+        self.assertEqual(payloads, ["data: first", "data: second"])
+        response.close.assert_called()
+        backend.close()
 
 
 if __name__ == "__main__":

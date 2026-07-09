@@ -121,6 +121,7 @@ environment:
 - 支持 `gpt-image-2`、`codex-gpt-image-2`、`auto`、`gpt-5`、`gpt-5-1`、`gpt-5-2`、`gpt-5-3`、`gpt-5-3-mini`、`gpt-5-mini` 模型选择
 - 设置页可为 `gpt-image-2` 配置 ChatGPT Web `picture_v2` 链路的底层内部模型，默认 `gpt-5-5-thinking`，支持切换到 `gpt-5-5`、`gpt-5-3` 或自定义 slug
 - 支持为 `gpt-image-2` 配置失败后自动切换备用内部模型；遇到无图、轮询超时或模型不可用时，会按顺序继续尝试备用模型
+- 后台支持单独配置图片 `picture_v2` 的 SSE 流硬超时，超过阈值会主动中断长连接，避免上游异常时挂起约 30 分钟
 - 编辑模式支持参考图上传
 - 前端支持多图生成交互
 - 本地保存图片会话历史，支持回看、删除和清空

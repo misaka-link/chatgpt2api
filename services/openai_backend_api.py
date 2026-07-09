@@ -4,6 +4,7 @@ import mimetypes
 import os
 import random
 import re
+import threading
 import time
 
 import urllib.error
@@ -38,6 +39,11 @@ class ImagePollTimeoutError(RuntimeError):
 
 class ImageContentPolicyError(RuntimeError):
     """Raised when image generation is blocked by content policy moderation."""
+    pass
+
+
+class ImageStreamHardTimeoutError(RuntimeError):
+    """Raised when the image SSE stream exceeds the configured wall-clock hard cap."""
     pass
 
 
@@ -2609,10 +2615,55 @@ class OpenAIBackendAPI:
         self._report_progress("starting_generation")
         response = self._start_image_generation(prompt, requirements, conduit_token, model, references, override_slug)
         self._report_progress("generating")
+        hard_timeout_secs = float(config.image_stream_hard_timeout_secs)
         try:
-            yield from iter_sse_payloads(response)
+            yield from self._iter_sse_payloads_capped(response, hard_timeout_secs)
+        except ImageStreamHardTimeoutError as exc:
+            timeout_exc = ImagePollTimeoutError(
+                f"ChatGPT 图片 SSE 流超时（已等待 {int(hard_timeout_secs)} 秒）。"
+                "上游可能未实际出图但保持连接未结束，已强制中断。"
+            )
+            setattr(timeout_exc, "sse_hard_timeout", True)
+            raise timeout_exc from exc
+
+    def _iter_sse_payloads_capped(self, response: Any, hard_cap_secs: float) -> Iterator[str]:
+        """Consume image SSE with a wall-clock hard cap to avoid long-hanging streams."""
+        deadline = time.monotonic() + hard_cap_secs
+        timed_out = threading.Event()
+
+        def _force_close() -> None:
+            timed_out.set()
+            try:
+                response.close()
+            except Exception:
+                pass
+
+        watchdog = threading.Timer(hard_cap_secs, _force_close)
+        watchdog.daemon = True
+        watchdog.start()
+        timeout_message = (
+            f"图片 SSE 流已超过硬超时 {int(hard_cap_secs)} 秒，"
+            "上游可能未生成图片却保持连接未结束。"
+        )
+        try:
+            for payload in iter_sse_payloads(response):
+                if timed_out.is_set() and time.monotonic() >= deadline:
+                    raise ImageStreamHardTimeoutError(timeout_message)
+                yield payload
+            if timed_out.is_set() and time.monotonic() >= deadline:
+                raise ImageStreamHardTimeoutError(timeout_message)
+        except ImageStreamHardTimeoutError:
+            raise
+        except Exception as exc:
+            if timed_out.is_set() and time.monotonic() >= deadline:
+                raise ImageStreamHardTimeoutError(timeout_message) from exc
+            raise
         finally:
-            response.close()
+            watchdog.cancel()
+            try:
+                response.close()
+            except Exception:
+                pass
 
     def _bootstrap(self) -> None:
         """预热首页，并提取 PoW 相关脚本引用。"""
