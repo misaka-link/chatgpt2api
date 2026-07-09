@@ -14,7 +14,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { deleteSystemLogs, fetchSystemLogs, type SystemLog } from "@/lib/api";
+import { clearSystemLogs, deleteSystemLogs, fetchSystemLogs, type SystemLog } from "@/lib/api";
 import { formatDisplayDateTime } from "@/lib/display-time";
 import { useAuthGuard } from "@/lib/use-auth-guard";
 import { useDisplayTimezone } from "@/lib/use-display-timezone";
@@ -71,8 +71,10 @@ function LogsContent() {
   const [page, setPage] = useState(1);
   const [isLoading, setIsLoading] = useState(true);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [isClearing, setIsClearing] = useState(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [deletingItems, setDeletingItems] = useState<SystemLog[]>([]);
+  const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
   const detailUrls = getUrls(detailLog);
   const detailImages = detailUrls.map((url, index) => ({ id: `${index}`, src: url }));
   const isCallLog = type === LogType.Call;
@@ -139,6 +141,44 @@ function LogsContent() {
     }
   };
 
+  const getClearScopeText = () => {
+    const parts = [typeLabels[type] || type || "日志"];
+    if (startDate && endDate) {
+      parts.push(`${startDate} 至 ${endDate}`);
+    } else if (startDate) {
+      parts.push(`${startDate} 起`);
+    } else if (endDate) {
+      parts.push(`截至 ${endDate}`);
+    } else {
+      parts.push("全部日期");
+    }
+    return parts.join(" / ");
+  };
+
+  const confirmClear = async () => {
+    setIsClearing(true);
+    try {
+      const data = await clearSystemLogs({ type, start_date: startDate, end_date: endDate });
+      toast.success(data.removed > 0 ? `已清空 ${data.removed} 条日志` : "当前筛选范围内没有日志");
+      setClearConfirmOpen(false);
+      setSelectedIds([]);
+      if (detailLog && (detailLog.type === type || !type)) {
+        const logDay = String(detailLog.time || "").slice(0, 10);
+        const matchesStart = !startDate || logDay >= startDate;
+        const matchesEnd = !endDate || logDay <= endDate;
+        if (matchesStart && matchesEnd) {
+          setDetailOpen(false);
+          setDetailLog(null);
+        }
+      }
+      await loadLogs();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "清空日志失败");
+    } finally {
+      setIsClearing(false);
+    }
+  };
+
   useEffect(() => {
     void loadLogs();
   }, [type, startDate, endDate]);
@@ -188,6 +228,15 @@ function LogsContent() {
               <Button variant="ghost" className="h-8 rounded-lg px-3 text-stone-500" onClick={() => void loadLogs()} disabled={isLoading}>
                 <RefreshCw className={`size-4 ${isLoading ? "animate-spin" : ""}`} />
                 刷新
+              </Button>
+              <Button
+                variant="outline"
+                className="h-8 rounded-lg border-rose-200 bg-white px-3 text-rose-600 hover:bg-rose-50"
+                onClick={() => setClearConfirmOpen(true)}
+                disabled={isLoading || isDeleting || isClearing || items.length === 0}
+              >
+                <Trash2 className="size-4" />
+                清空全部日志
               </Button>
               <button type="button" className="text-sm text-stone-500 hover:text-stone-900 disabled:text-stone-300" onClick={() => setSelectedIds([])} disabled={selectedIds.length === 0 || isDeleting}>
                 取消选择
@@ -349,6 +398,25 @@ function LogsContent() {
             <Button className="rounded-xl bg-rose-600 text-white hover:bg-rose-700" onClick={() => void confirmDelete()} disabled={isDeleting || deletingItems.length === 0}>
               {isDeleting ? <LoaderCircle className="size-4 animate-spin" /> : null}
               确认删除
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <Dialog open={clearConfirmOpen} onOpenChange={setClearConfirmOpen}>
+        <DialogContent showCloseButton={false} className="rounded-2xl p-6">
+          <DialogHeader className="gap-2">
+            <DialogTitle>清空全部日志</DialogTitle>
+            <DialogDescription className="text-sm leading-6">
+              确认清空当前筛选范围内的全部日志吗？范围：{getClearScopeText()}。删除后无法恢复。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" className="rounded-xl" onClick={() => setClearConfirmOpen(false)} disabled={isClearing}>
+              取消
+            </Button>
+            <Button className="rounded-xl bg-rose-600 text-white hover:bg-rose-700" onClick={() => void confirmClear()} disabled={isClearing || items.length === 0}>
+              {isClearing ? <LoaderCircle className="size-4 animate-spin" /> : null}
+              确认清空
             </Button>
           </DialogFooter>
         </DialogContent>

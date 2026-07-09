@@ -771,6 +771,17 @@ export async function deleteSystemLogs(ids: string[]) {
   });
 }
 
+export async function clearSystemLogs(filters: { type?: string; start_date?: string; end_date?: string }) {
+  return httpRequest<{ removed: number }>("/api/logs/clear", {
+    method: "POST",
+    body: {
+      type: filters.type || "",
+      start_date: filters.start_date || "",
+      end_date: filters.end_date || "",
+    },
+  });
+}
+
 export async function fetchUserKeys() {
   return httpRequest<{ items: UserKey[] }>("/api/auth/users");
 }
