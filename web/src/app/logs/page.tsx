@@ -229,6 +229,13 @@ function LogsContent() {
                 <RefreshCw className={`size-4 ${isLoading ? "animate-spin" : ""}`} />
                 刷新
               </Button>
+              <button type="button" className="text-sm text-stone-500 hover:text-stone-900 disabled:text-stone-300" onClick={() => setSelectedIds([])} disabled={selectedIds.length === 0 || isDeleting}>
+                取消选择
+              </button>
+              <Button variant="outline" className="h-8 rounded-lg border-rose-200 bg-white px-3 text-rose-600 hover:bg-rose-50" onClick={() => setDeletingItems(items.filter((item) => selectedSet.has(item.id)))} disabled={selectedIds.length === 0 || isDeleting}>
+                <Trash2 className="size-4" />
+                删除所选
+              </Button>
               <Button
                 variant="outline"
                 className="h-8 rounded-lg border-rose-200 bg-white px-3 text-rose-600 hover:bg-rose-50"
@@ -237,13 +244,6 @@ function LogsContent() {
               >
                 <Trash2 className="size-4" />
                 清空全部日志
-              </Button>
-              <button type="button" className="text-sm text-stone-500 hover:text-stone-900 disabled:text-stone-300" onClick={() => setSelectedIds([])} disabled={selectedIds.length === 0 || isDeleting}>
-                取消选择
-              </button>
-              <Button variant="outline" className="h-8 rounded-lg border-rose-200 bg-white px-3 text-rose-600 hover:bg-rose-50" onClick={() => setDeletingItems(items.filter((item) => selectedSet.has(item.id)))} disabled={selectedIds.length === 0 || isDeleting}>
-                <Trash2 className="size-4" />
-                删除所选
               </Button>
             </div>
           </div>
