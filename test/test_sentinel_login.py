@@ -108,6 +108,57 @@ class FakeSession:
 
 
 class SentinelTokenTests(unittest.TestCase):
+    def test_quickjs_browser_shim_supports_dom_storage_and_geometry(self) -> None:
+        source = """
+var P={getRequirementsToken:function(){return 'REQ';},getRequirementsTokenBlocking:function(){return 'REQ';},getEnforcementToken:function(){return Promise.resolve('POW');},getEnforcementTokenSync:function(){return 'POW';}};
+var D=function(){}; var C=function(){return 'id';}; var _n=function(){return Promise.resolve('turnstile');};
+var $=function(){return '';}; var Ot=function(fn){return fn();}; var jt=function(){return Promise.resolve(null);}; var Nt=function(){return Promise.resolve('snapshot');};
+var Zn='test'; var we=function(){}; var t={}; t.init=we,t.sessionObserverToken=async function(t){return null;}; var SentinelSDK=t;
+"""
+        runtime = sentinel_utils.SentinelSDKRuntime(
+            sentinel_utils._SdkBundle(
+                version="test",
+                source=source,
+                sdk_url="https://sentinel.openai.com/sentinel/test/sdk.js",
+            ),
+            sentinel_utils.DEFAULT_SENTINEL_USER_AGENT,
+        )
+
+        result = json.loads(
+            runtime._context.eval(
+                """
+(function(){
+  localStorage.setItem('key', 'value');
+  sessionStorage.setItem('session-key', 'session-value');
+  var parent = document.createElement('div');
+  var child = document.createElement('span');
+  parent.appendChild(child);
+  var before = parent.children.length;
+  parent.removeChild(child);
+  var rect = parent.getBoundingClientRect();
+  return JSON.stringify({
+    storage: localStorage.getItem('key'),
+    sessionStorage: sessionStorage.getItem('session-key'),
+    before: before,
+    after: parent.children.length,
+    width: rect.width
+  });
+})()
+"""
+            )
+        )
+
+        self.assertEqual(
+            result,
+            {
+                "storage": "value",
+                "sessionStorage": "session-value",
+                "before": 1,
+                "after": 0,
+                "width": 0,
+            },
+        )
+
     def test_build_sentinel_token_returns_sdk_backed_headers(self) -> None:
         class Runtime:
             sdk_bundle = type("SdkBundle", (), {"version": "20260219f9f6"})()
@@ -173,7 +224,7 @@ class SentinelTokenTests(unittest.TestCase):
             {"so": "snapshot-b64", "c": "challenge-token", "id": "device-1", "flow": "password_verify"},
         )
 
-    def test_build_sentinel_token_omits_so_token_when_snapshot_generation_fails(self) -> None:
+    def test_build_sentinel_token_omits_optional_so_token_when_snapshot_generation_fails(self) -> None:
         class Runtime:
             sdk_bundle = type("SdkBundle", (), {"version": "20260219f9f6"})()
 
@@ -201,7 +252,6 @@ class SentinelTokenTests(unittest.TestCase):
                     payload={
                         "token": "challenge-token",
                         "proofofwork": {"required": False},
-                        "so": {"required": True, "collector_dx": "collector-dx", "snapshot_dx": "snapshot-dx"},
                     },
                 )
 
@@ -222,6 +272,155 @@ class SentinelTokenTests(unittest.TestCase):
         self.assertEqual(oai_sc_value, "0challenge-token")
         self.assertEqual(so_token, "")
         self.assertTrue(warning_mock.called)
+
+    def test_build_sentinel_token_rejects_required_turnstile_runtime_error(self) -> None:
+        encoded_error = base64.b64encode(b"TypeError: Cannot read properties of undefined (reading 'bind')").decode("ascii")
+
+        class Runtime:
+            sdk_bundle = type("SdkBundle", (), {"version": "20260219f9f6"})()
+
+            def call(self, name: str, *args, **kwargs):
+                if name == "getRequirementsToken":
+                    return "REQ"
+                if name == "makeHandle":
+                    return "handle-1"
+                if name == "attachRequirements":
+                    return None
+                if name == "getEnforcementToken":
+                    return "POW"
+                if name == "runTurnstile":
+                    return encoded_error
+                if name == "runCollector":
+                    return "collector-ok"
+                if name == "runSnapshot":
+                    return "snapshot-b64"
+                raise AssertionError(f"unexpected runtime call: {name}")
+
+        class Session:
+            def post(self, *args, **kwargs):
+                return FakeResponse(
+                    status_code=200,
+                    payload={
+                        "token": "challenge-token",
+                        "proofofwork": {"required": True},
+                        "turnstile": {"required": True, "dx": "turnstile-dx"},
+                        "so": {
+                            "required": True,
+                            "collector_dx": "collector-dx",
+                            "snapshot_dx": "snapshot-dx",
+                        },
+                    },
+                )
+
+        with patch.object(sentinel_utils._runtime_pool, "get_runtime", return_value=Runtime()):
+            with self.assertRaisesRegex(RuntimeError, "sentinel_turnstile_required_missing"):
+                sentinel_utils.build_sentinel_token(
+                    Session(),
+                    "device-1",
+                    "oauth_create_account",
+                )
+
+    def test_build_sentinel_token_drops_optional_invalid_turnstile_from_payload(self) -> None:
+        encoded_error = base64.b64encode(b"TypeError: Cannot read properties of undefined (reading 'bind')").decode("ascii")
+
+        class Runtime:
+            sdk_bundle = type("SdkBundle", (), {"version": "20260219f9f6"})()
+
+            def call(self, name: str, *args, **kwargs):
+                if name == "getRequirementsToken":
+                    return "REQ"
+                if name == "makeHandle":
+                    return "handle-1"
+                if name == "attachRequirements":
+                    return None
+                if name == "getEnforcementToken":
+                    return "POW"
+                if name == "runTurnstile":
+                    return encoded_error
+                if name == "runCollector":
+                    return "collector-ok"
+                if name == "runSnapshot":
+                    return "snapshot-b64"
+                raise AssertionError(f"unexpected runtime call: {name}")
+
+        class Session:
+            def post(self, *args, **kwargs):
+                return FakeResponse(
+                    status_code=200,
+                    payload={
+                        "token": "challenge-token",
+                        "proofofwork": {"required": True},
+                        "turnstile": {"required": False, "dx": "turnstile-dx"},
+                        "so": {
+                            "required": True,
+                            "collector_dx": "collector-dx",
+                            "snapshot_dx": "snapshot-dx",
+                        },
+                    },
+                )
+
+        with patch.object(sentinel_utils._runtime_pool, "get_runtime", return_value=Runtime()):
+            sentinel_value, _, so_token = sentinel_utils.build_sentinel_token(
+                Session(),
+                "device-1",
+                "oauth_create_account",
+            )
+
+        self.assertEqual(
+            json.loads(sentinel_value),
+            {
+                "p": "POW",
+                "t": "",
+                "c": "challenge-token",
+                "id": "device-1",
+                "flow": "oauth_create_account",
+            },
+        )
+        self.assertEqual(
+            json.loads(so_token),
+            {"so": "snapshot-b64", "c": "challenge-token", "id": "device-1", "flow": "oauth_create_account"},
+        )
+
+    def test_build_sentinel_token_rejects_required_so_when_snapshot_generation_fails(self) -> None:
+        class Runtime:
+            sdk_bundle = type("SdkBundle", (), {"version": "20260219f9f6"})()
+
+            def call(self, name: str, *args, **kwargs):
+                if name == "getRequirementsToken":
+                    return "REQ"
+                if name == "makeHandle":
+                    return "handle-1"
+                if name == "attachRequirements":
+                    return None
+                if name == "getEnforcementToken":
+                    return "POW"
+                if name == "runTurnstile":
+                    return "turnstile-token"
+                if name == "runCollector":
+                    raise RuntimeError("collector failed")
+                if name == "runSnapshot":
+                    return ""
+                raise AssertionError(f"unexpected runtime call: {name}")
+
+        class Session:
+            def post(self, *args, **kwargs):
+                return FakeResponse(
+                    status_code=200,
+                    payload={
+                        "token": "challenge-token",
+                        "proofofwork": {"required": True},
+                        "turnstile": {"required": True, "dx": "turnstile-dx"},
+                        "so": {"required": True, "collector_dx": "collector-dx", "snapshot_dx": "snapshot-dx"},
+                    },
+                )
+
+        with patch.object(sentinel_utils._runtime_pool, "get_runtime", return_value=Runtime()):
+            with self.assertRaisesRegex(RuntimeError, "sentinel_so_required_missing"):
+                sentinel_utils.build_sentinel_token(
+                    Session(),
+                    "device-1",
+                    "oauth_create_account",
+                )
 
 
 class AccountPasswordLoginTests(unittest.TestCase):

@@ -37,7 +37,7 @@ class AccountService:
     _OAUTH_USER_AGENT = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/145.0.0.0 Safari/537.36"
+        "Chrome/149.0.0.0 Safari/537.36"
     )
 
     # 刷新进度追踪
@@ -641,7 +641,7 @@ class AccountService:
                     "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
                     "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
                     "user-agent": user_agent,
-                    "sec-ch-ua": '"Chromium";v="145", "Google Chrome";v="145", "Not/A)Brand";v="99"',
+                    "sec-ch-ua": '"Google Chrome";v="149", "Chromium";v="149", "Not?A_Brand";v="24"',
                     "sec-ch-ua-mobile": "?0",
                     "sec-ch-ua-platform": '"Windows"',
                     "sec-fetch-dest": "document",
@@ -683,7 +683,7 @@ class AccountService:
                 "origin": auth_base,
                 "priority": "u=1, i",
                 "user-agent": user_agent,
-                "sec-ch-ua": '"Chromium";v="145", "Google Chrome";v="145", "Not/A)Brand";v="99"',
+                "sec-ch-ua": '"Google Chrome";v="149", "Chromium";v="149", "Not?A_Brand";v="24"',
                 "sec-ch-ua-mobile": "?0",
                 "sec-ch-ua-platform": '"Windows"',
                 "sec-fetch-dest": "empty",
@@ -764,7 +764,7 @@ class AccountService:
                     "pragma": "no-cache",
                     "priority": "u=1, i",
                     "referer": f"{platform_base}/",
-                    "sec-ch-ua": '"Chromium";v="145", "Google Chrome";v="145", "Not/A)Brand";v="99"',
+                    "sec-ch-ua": '"Google Chrome";v="149", "Chromium";v="149", "Not?A_Brand";v="24"',
                     "sec-ch-ua-mobile": "?0",
                     "sec-ch-ua-platform": '"Windows"',
                     "sec-fetch-dest": "empty",

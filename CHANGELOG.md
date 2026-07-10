@@ -4,6 +4,12 @@
 
 + [预告] 下一版本将基于本仓库提交历史继续维护发布记录。
 
+## 1.5.3 - 2026-07-11
+
++ [新增] Sentinel QuickJS 运行时补齐 DOM、Storage、Navigator、timer 与 `TextEncoder` 等官方 SDK 当前依赖的浏览器能力。
++ [修复] 注册与密码登录严格校验官方要求的 Turnstile / SO token，识别并丢弃 Base64 包装的运行时错误，避免继续提交无效组合 token。
++ [优化] 注册、密码登录和稳定代理默认浏览器指纹统一更新到 Chrome 149，并改进 Sentinel 长度、required 模式与错误诊断日志。
+
 ## 1.5.2 - 2026-07-11
 
 + [新增] 注册流程兼容官方建号成功后的 `create-account-enroll-passkey` Passkey 引导页，自动调用官方跳过接口并继续换取 OAuth code。

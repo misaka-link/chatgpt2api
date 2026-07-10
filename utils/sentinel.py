@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import os
 import re
@@ -26,9 +28,9 @@ if TYPE_CHECKING:
 DEFAULT_SENTINEL_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/145.0.0.0 Safari/537.36"
+    "Chrome/149.0.0.0 Safari/537.36"
 )
-DEFAULT_SENTINEL_SEC_CH_UA = '"Chromium";v="145", "Google Chrome";v="145", "Not/A)Brand";v="99"'
+DEFAULT_SENTINEL_SEC_CH_UA = '"Google Chrome";v="149", "Chromium";v="149", "Not?A_Brand";v="24"'
 SENTINEL_LOADER_URL = "https://sentinel.openai.com/backend-api/sentinel/sdk.js"
 SENTINEL_LOADER_FALLBACK_URL = "https://chatgpt.com/backend-api/sentinel/sdk.js"
 SENTINEL_REQ_URL = "https://sentinel.openai.com/backend-api/sentinel/req"
@@ -39,6 +41,9 @@ SENTINEL_REFRESH_AFTER_SECONDS = 15 * 60
 SENTINEL_OBSERVER_TIMEOUT_MS = 5000
 SENTINEL_REQ_TIMEOUT_SECONDS = 20
 SENTINEL_JS_CALL_TIMEOUT_SECONDS = 8.0
+SENTINEL_RUNTIME_MODE = "quickjs_browser_shim"
+SENTINEL_BASE64_VALUE_RE = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
+SENTINEL_RUNTIME_ERROR_RE = re.compile(r"(?:TypeError|ReferenceError|SyntaxError|RangeError|EvalError|URIError):")
 
 
 @dataclass(slots=True)
@@ -46,6 +51,22 @@ class _SdkBundle:
     version: str
     source: str
     sdk_url: str
+
+
+@dataclass(slots=True)
+class _SentinelRequirement:
+    required: bool = False
+    dx: str = ""
+    collector_dx: str = ""
+    snapshot_dx: str = ""
+
+
+@dataclass(slots=True)
+class _SentinelChallenge:
+    token: str
+    proof: _SentinelRequirement
+    turnstile: _SentinelRequirement
+    so: _SentinelRequirement
 
 
 class _PromiseBridge:
@@ -150,11 +171,26 @@ class SentinelSDKRuntime:
     def _build_js_shim(self) -> str:
         sdk_url = json.dumps(self.sdk_bundle.sdk_url)
         user_agent = json.dumps(self.user_agent)
+        chrome_full_version = "149.0.0.0"
+        chrome_major_version = "149"
+        chrome_match = re.search(r"Chrome/(\d+(?:\.\d+){0,3})", self.user_agent)
+        if chrome_match:
+            chrome_full_version = chrome_match.group(1)
+            chrome_major_version = chrome_full_version.split(".", 1)[0]
+        navigator_brands = json.dumps(
+            [
+                {"brand": "Google Chrome", "version": chrome_major_version},
+                {"brand": "Chromium", "version": chrome_major_version},
+                {"brand": "Not?A_Brand", "version": "24"},
+            ],
+            separators=(",", ":"),
+        )
         return f"""
 var __realGlobal = globalThis;
 var __now = 1000;
 var __timerSeq = 1;
 var __timers = [];
+var __intervals = Object.create(null);
 function setTimeout(fn, delay) {{
   var id = __timerSeq++;
   __timers.push({{ id: id, at: __now + (Number(delay) || 0), fn: fn }});
@@ -162,6 +198,28 @@ function setTimeout(fn, delay) {{
 }}
 function clearTimeout(id) {{
   __timers = __timers.filter(function(t) {{ return t.id !== id; }});
+}}
+function setInterval(fn, delay) {{
+  var id = __timerSeq++;
+  var interval = Math.max(0, Number(delay) || 0);
+  function tick() {{
+    if (!__intervals[id]) return;
+    try {{
+      fn();
+    }} finally {{
+      if (__intervals[id]) {{
+        __intervals[id].timer = setTimeout(tick, interval);
+      }}
+    }}
+  }}
+  __intervals[id] = {{ timer: setTimeout(tick, interval) }};
+  return id;
+}}
+function clearInterval(id) {{
+  var entry = __intervals[id];
+  if (!entry) return;
+  clearTimeout(entry.timer);
+  delete __intervals[id];
 }}
 function __advanceTimers(ms) {{
   __now += Number(ms) || 0;
@@ -186,6 +244,15 @@ function requestIdleCallback(fn, opts) {{
   return setTimeout(function() {{
     fn({{ timeRemaining: function() {{ return 10; }}, didTimeout: false }});
   }}, 0);
+}}
+function queueMicrotask(fn) {{
+  Promise.resolve().then(fn);
+}}
+function requestAnimationFrame(fn) {{
+  return setTimeout(function() {{ fn(__now); }}, 16);
+}}
+function cancelAnimationFrame(id) {{
+  clearTimeout(id);
 }}
 function URL(input, base) {{
   var p = JSON.parse(__py_url_parts(String(input), base === undefined ? null : String(base)));
@@ -266,30 +333,196 @@ var performance = __wrap({{
 }}, 'performance');
 var navigator = __wrap({{
   userAgent: {user_agent},
+  appCodeName: 'Mozilla',
+  appName: 'Netscape',
+  appVersion: {user_agent},
   language: 'en-US',
   languages: ['en-US', 'en'],
-  hardwareConcurrency: 8
+  hardwareConcurrency: 8,
+  deviceMemory: 8,
+  cookieEnabled: true,
+  onLine: true,
+  pdfViewerEnabled: true,
+  platform: 'Win32',
+  product: 'Gecko',
+  productSub: '20030107',
+  vendor: 'Google Inc.',
+  vendorSub: '',
+  webdriver: false,
+  userAgentData: {{
+    brands: {navigator_brands},
+    mobile: false,
+    platform: 'Windows',
+    getHighEntropyValues: function() {{
+      return Promise.resolve({{
+        architecture: 'x86',
+        bitness: '64',
+        brands: {navigator_brands},
+        fullVersionList: [
+          {{ brand: 'Google Chrome', version: '{chrome_full_version}' }},
+          {{ brand: 'Chromium', version: '{chrome_full_version}' }},
+          {{ brand: 'Not?A_Brand', version: '24.0.0.0' }}
+        ],
+        mobile: false,
+        model: '',
+        platform: 'Windows',
+        platformVersion: '10.0.0',
+        uaFullVersion: '{chrome_full_version}'
+      }});
+    }}
+  }}
 }}, 'navigator');
 var screen = __wrap({{ width: 1920, height: 1080 }}, 'screen');
-var __docScripts = [{{ src: {sdk_url} }}, {{ src: 'https://auth.openai.com/c/prod-test/_' }}];
-function __makeElement(tag) {{
-  return __wrap({{
-    tagName: String(tag || '').toUpperCase(),
-    style: {{}},
-    src: '',
-    addEventListener: function(event, cb) {{ if (event === 'load') setTimeout(cb, 0); }},
-    contentWindow: __magic('contentWindow')
-  }}, 'element');
+function __rect() {{
+  return {{
+    x: 0,
+    y: 0,
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    width: 0,
+    height: 0,
+    toJSON: function() {{
+      return {{ x: 0, y: 0, top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 }};
+    }}
+  }};
 }}
+function __makeStorage() {{
+  var state = Object.create(null);
+  var storage = {{
+    getItem: function(key) {{
+      key = String(key);
+      return Object.prototype.hasOwnProperty.call(state, key) ? state[key] : null;
+    }},
+    setItem: function(key, value) {{
+      state[String(key)] = String(value);
+    }},
+    removeItem: function(key) {{
+      delete state[String(key)];
+    }},
+    clear: function() {{
+      state = Object.create(null);
+    }},
+    key: function(index) {{
+      var keys = Object.keys(state);
+      var i = Number(index) || 0;
+      return i >= 0 && i < keys.length ? keys[i] : null;
+    }}
+  }};
+  Object.defineProperty(storage, 'length', {{
+    get: function() {{
+      return Object.keys(state).length;
+    }}
+  }});
+  return storage;
+}}
+function __makeNode(tag, label) {{
+  var node = {{
+    tagName: String(tag || '').toUpperCase(),
+    nodeName: String(tag || '').toUpperCase(),
+    nodeType: 1,
+    style: {{}},
+    dataset: {{}},
+    attributes: {{}},
+    children: [],
+    childNodes: [],
+    parentNode: null,
+    ownerDocument: null,
+    src: '',
+    textContent: '',
+    innerHTML: '',
+    appendChild: function(el) {{
+      if (!el) return el;
+      if (el.parentNode && typeof el.parentNode.removeChild === 'function') {{
+        el.parentNode.removeChild(el);
+      }}
+      el.parentNode = this;
+      this.children.push(el);
+      this.childNodes = this.children;
+      return el;
+    }},
+    removeChild: function(el) {{
+      var index = this.children.indexOf(el);
+      if (index >= 0) {{
+        this.children.splice(index, 1);
+      }}
+      if (el) {{
+        el.parentNode = null;
+      }}
+      this.childNodes = this.children;
+      return el;
+    }},
+    addEventListener: function(event, cb) {{
+      if (event === 'load' && typeof cb === 'function') setTimeout(cb, 0);
+    }},
+    removeEventListener: function() {{}},
+    dispatchEvent: function() {{ return true; }},
+    getBoundingClientRect: function() {{ return __rect(); }},
+    setAttribute: function(name, value) {{
+      var key = String(name);
+      var text = String(value);
+      this.attributes[key] = text;
+      if (key === 'src') this.src = text;
+    }},
+    getAttribute: function(name) {{
+      var key = String(name);
+      return Object.prototype.hasOwnProperty.call(this.attributes, key) ? this.attributes[key] : null;
+    }},
+    removeAttribute: function(name) {{
+      delete this.attributes[String(name)];
+    }},
+    classList: {{
+      add: function() {{}},
+      remove: function() {{}},
+      contains: function() {{ return false; }}
+    }},
+    contentWindow: __magic((label || 'node') + '.contentWindow')
+  }};
+  return __wrap(node, label || 'node');
+}}
+var __documentElement = __makeNode('html', 'document.documentElement');
+var __documentHead = __makeNode('head', 'document.head');
+var __documentBody = __makeNode('body', 'document.body');
+__documentElement.appendChild(__documentHead);
+__documentElement.appendChild(__documentBody);
+var __docScripts = [
+  __makeNode('script', 'document.scripts[0]'),
+  __makeNode('script', 'document.scripts[1]')
+];
+__docScripts[0].src = {sdk_url};
+__docScripts[1].src = 'https://auth.openai.com/c/prod-test/_';
 var document = __wrap({{
   cookie: '',
   scripts: __docScripts,
   currentScript: __docScripts[0],
-  documentElement: {{ getAttribute: function(name) {{ return name === 'data-build' ? 'prod-test-build' : null; }} }},
-  body: {{ appendChild: function(el) {{ return el; }} }},
-  head: {{ appendChild: function(el) {{ return el; }} }},
-  createElement: function(tag) {{ return __makeElement(tag); }}
+  documentElement: __documentElement,
+  body: __documentBody,
+  head: __documentHead,
+  createElement: function(tag) {{
+    var element = __makeNode(tag, 'document.createElement(' + String(tag || '') + ')');
+    element.ownerDocument = document;
+    return element;
+  }},
+  createElementNS: function(ns, tag) {{
+    var element = __makeNode(tag, 'document.createElementNS(' + String(tag || '') + ')');
+    element.ownerDocument = document;
+    return element;
+  }},
+  querySelector: function() {{ return null; }},
+  querySelectorAll: function() {{ return []; }},
+  getElementById: function() {{ return null; }},
+  addEventListener: function() {{}},
+  removeEventListener: function() {{}}
 }}, 'document');
+document.documentElement.getAttribute = function(name) {{
+  return name === 'data-build' ? 'prod-test-build' : null;
+}};
+document.documentElement.ownerDocument = document;
+document.head.ownerDocument = document;
+document.body.ownerDocument = document;
+var localStorage = __makeStorage();
+var sessionStorage = __makeStorage();
 var window = __wrap(__realGlobal, 'window');
 window.window = window;
 window.self = window;
@@ -300,13 +533,31 @@ window.document = document;
 window.navigator = navigator;
 window.screen = screen;
 window.performance = performance;
+window.localStorage = localStorage;
+window.sessionStorage = sessionStorage;
+window.setTimeout = setTimeout;
+window.clearTimeout = clearTimeout;
+window.setInterval = setInterval;
+window.clearInterval = clearInterval;
+window.queueMicrotask = queueMicrotask;
+window.requestAnimationFrame = requestAnimationFrame;
+window.cancelAnimationFrame = cancelAnimationFrame;
 window.addEventListener = function() {{}};
 window.removeEventListener = function() {{}};
 window.requestIdleCallback = requestIdleCallback;
 window.structuredClone = function(v) {{ return JSON.parse(JSON.stringify(v)); }};
 window.ai = {{}};
 window.solana = {{}};
-window.TextEncoder = undefined;
+function TextEncoder() {{}}
+TextEncoder.prototype.encode = function(input) {{
+  var str = unescape(encodeURIComponent(String(input || '')));
+  var output = new Uint8Array(str.length);
+  for (var i = 0; i < str.length; i++) {{
+    output[i] = str.charCodeAt(i);
+  }}
+  return output;
+}};
+window.TextEncoder = TextEncoder;
 var crypto = {{
   getRandomValues: function(arr) {{
     var hex = __py_random_hex(arr.length);
@@ -428,6 +679,68 @@ class _SentinelRuntimePool:
 _runtime_pool = _SentinelRuntimePool()
 
 
+def _sentinel_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _parse_requirement(data: Any) -> _SentinelRequirement:
+    if not isinstance(data, dict):
+        return _SentinelRequirement()
+    return _SentinelRequirement(
+        required=_sentinel_bool(data.get("required")),
+        dx=str(data.get("dx") or "").strip(),
+        collector_dx=str(data.get("collector_dx") or "").strip(),
+        snapshot_dx=str(data.get("snapshot_dx") or "").strip(),
+    )
+
+
+def _parse_sentinel_challenge(data: Any) -> _SentinelChallenge:
+    if not isinstance(data, dict):
+        data = {}
+    return _SentinelChallenge(
+        token=str(data.get("token") or "").strip(),
+        proof=_parse_requirement(data.get("proofofwork")),
+        turnstile=_parse_requirement(data.get("turnstile")),
+        so=_parse_requirement(data.get("so")),
+    )
+
+
+def _maybe_decode_base64_error(value: str) -> str:
+    text = str(value or "").strip()
+    if not text or len(text) < 16 or len(text) % 4 == 1 or not SENTINEL_BASE64_VALUE_RE.fullmatch(text):
+        return ""
+    try:
+        decoded = base64.b64decode(text, validate=True)
+    except (binascii.Error, ValueError):
+        return ""
+    try:
+        message = decoded.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        return ""
+    return message if SENTINEL_RUNTIME_ERROR_RE.search(message) else ""
+
+
+def _extract_runtime_error(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if SENTINEL_RUNTIME_ERROR_RE.search(text):
+        return text
+    return _maybe_decode_base64_error(text)
+
+
+def _sentinel_mode(required: bool, enabled: bool) -> str:
+    if required:
+        return "required"
+    if enabled:
+        return "optional"
+    return "disabled"
+
+
 def _so_header_from_snapshot(snapshot_value: str | None, challenge_token: str, device_id: str, flow: str) -> str:
     snapshot_value = str(snapshot_value or "").strip()
     if not snapshot_value:
@@ -472,57 +785,156 @@ def build_sentinel_token(
         verify=False,
     )
     data = req_resp.json() if req_resp.text else {}
-    challenge_token = str(data.get("token") or "").strip()
+    if not isinstance(data, dict):
+        data = {}
+    challenge = _parse_sentinel_challenge(data)
+    challenge_token = challenge.token
     if req_resp.status_code != 200 or not challenge_token:
         raise RuntimeError(f"sentinel_req_failed_{req_resp.status_code}")
 
     handle = str(runtime.call("makeHandle", json.dumps(data, separators=(",", ":"))))
     runtime.call("attachRequirements", handle, requirements_token)
-    enforcement_token = str(runtime.call("getEnforcementToken", handle) or "").strip()
+    proof_error = ""
+    try:
+        enforcement_token = str(runtime.call("getEnforcementToken", handle) or "").strip()
+    except Exception as error:
+        enforcement_token = ""
+        proof_error = str(error)
     if not enforcement_token:
-        raise RuntimeError("sentinel_enforcement_token_empty")
+        logger.warning(
+            {
+                "event": "sentinel_proof_required_missing",
+                "flow": flow,
+                "sdk_version": runtime.sdk_bundle.version,
+                "runtime_mode": SENTINEL_RUNTIME_MODE,
+                "proof_mode": _sentinel_mode(challenge.proof.required, True),
+                "proof_error": proof_error,
+                "p_length": 0,
+                "t_length": 0,
+                "c_length": len(challenge_token),
+                "so_length": 0,
+            }
+        )
+        raise RuntimeError(f"sentinel_enforcement_token_empty:{proof_error or 'empty'}")
 
     turnstile_token = ""
+    turnstile_error = ""
     try:
         turnstile_token = str(runtime.call("runTurnstile", handle, timeout=5.0) or "").strip()
-    except Exception:
+    except Exception as error:
         turnstile_token = ""
+        turnstile_error = str(error)
+    else:
+        decoded_error = _extract_runtime_error(turnstile_token)
+        if decoded_error:
+            turnstile_error = decoded_error
+            turnstile_token = ""
 
     so_header = ""
     snapshot_value = ""
+    so_error = ""
     try:
         runtime.call("runCollector", handle, timeout=5.0)
         snapshot_value = str(runtime.call("runSnapshot", handle, timeout=5.0) or "").strip()
+        decoded_snapshot_error = _extract_runtime_error(snapshot_value)
+        if decoded_snapshot_error:
+            so_error = decoded_snapshot_error
+            snapshot_value = ""
         so_header = _so_header_from_snapshot(snapshot_value, challenge_token, device_id, flow)
     except Exception as error:
+        so_error = str(error)
+
+    proof_mode = _sentinel_mode(challenge.proof.required, True)
+    turnstile_mode = _sentinel_mode(challenge.turnstile.required, bool(challenge.turnstile.dx))
+    so_mode = _sentinel_mode(
+        challenge.so.required,
+        bool(challenge.so.collector_dx or challenge.so.snapshot_dx),
+    )
+
+    if challenge.turnstile.required and not turnstile_token:
+        logger.warning(
+            {
+                "event": "sentinel_turnstile_required_missing",
+                "flow": flow,
+                "sdk_version": runtime.sdk_bundle.version,
+                "runtime_mode": SENTINEL_RUNTIME_MODE,
+                "turnstile_mode": turnstile_mode,
+                "turnstile_error": turnstile_error,
+                "p_length": len(enforcement_token),
+                "t_length": 0,
+                "c_length": len(challenge_token),
+                "so_length": len(so_header),
+            }
+        )
+        raise RuntimeError(f"sentinel_turnstile_required_missing:{turnstile_error or 'empty'}")
+
+    if challenge.so.required and not so_header:
+        logger.warning(
+            {
+                "event": "sentinel_so_required_missing",
+                "flow": flow,
+                "sdk_version": runtime.sdk_bundle.version,
+                "runtime_mode": SENTINEL_RUNTIME_MODE,
+                "so_mode": so_mode,
+                "so_error": so_error,
+                "p_length": len(enforcement_token),
+                "t_length": len(turnstile_token),
+                "c_length": len(challenge_token),
+                "so_length": 0,
+            }
+        )
+        raise RuntimeError(f"sentinel_so_required_missing:{so_error or 'empty'}")
+
+    if turnstile_error and not challenge.turnstile.required:
+        logger.warning(
+            {
+                "event": "sentinel_turnstile_optional_invalid",
+                "flow": flow,
+                "sdk_version": runtime.sdk_bundle.version,
+                "runtime_mode": SENTINEL_RUNTIME_MODE,
+                "turnstile_mode": turnstile_mode,
+                "turnstile_error": turnstile_error,
+            }
+        )
+    if so_error and not challenge.so.required:
         logger.warning(
             {
                 "event": "sentinel_so_generation_failed",
                 "flow": flow,
                 "sdk_version": runtime.sdk_bundle.version,
-                "error": str(error),
+                "runtime_mode": SENTINEL_RUNTIME_MODE,
+                "so_mode": so_mode,
+                "so_error": so_error,
             }
         )
 
     sentinel_value = json.dumps(
         {
             "p": enforcement_token,
-            "t": turnstile_token or None,
+            "t": turnstile_token,
             "c": challenge_token,
             "id": device_id,
             "flow": flow,
         },
         separators=(",", ":"),
-    ).replace(":null", ':""')
+    )
     oai_sc_value = "0" + challenge_token
     logger.info(
         {
             "event": "sentinel_tokens_generated",
             "flow": flow,
             "sdk_version": runtime.sdk_bundle.version,
-            "sentinel_token_length": len(sentinel_value),
-            "so_token_generated": bool(so_header),
-            "so_token_length": len(so_header),
+            "runtime_mode": SENTINEL_RUNTIME_MODE,
+            "proof_mode": proof_mode,
+            "turnstile_mode": turnstile_mode,
+            "so_mode": so_mode,
+            "p_length": len(enforcement_token),
+            "t_length": len(turnstile_token),
+            "c_length": len(challenge_token),
+            "so_length": len(so_header),
+            "proof_error": proof_error,
+            "turnstile_error": turnstile_error,
+            "so_error": so_error,
         }
     )
     return sentinel_value, oai_sc_value, so_header
