@@ -146,7 +146,7 @@ environment:
 - 支持四种导入方式：本地 CPA JSON 文件导入、远程 CPA 服务器导入、`sub2api` 服务器导入、`access_token` 导入
 - 支持在设置页配置 `sub2api` 服务器，筛选并批量导入其中的 OpenAI OAuth 账号
 - 后台日志管理支持按类型和日期筛选、查看详情、删除选中记录，并可一键清空当前筛选结果
-- 注册邮箱支持 YYDSMail 动态域名获取和学习模式，会优先使用接口返回的可用域名，接口不可用时回退到配置域名或官方自动选域策略；当学习模式遇到 `registration_disallowed` / “Sorry, we cannot create your account with the given information.” 时，会把当前邮箱对应的域名标记为本地不可用并自动切换新邮箱重试；注册页会在学习模式下展示可编辑的黑名单域名列表和信任域名列表，支持新增、编辑、删除、清空全部并立即生效
+- 注册邮箱支持 YYDSMail 动态域名获取和学习模式，会优先使用接口返回的可用域名，接口不可用时回退到配置域名或官方自动选域策略；当学习模式遇到 OpenAI 的 `registration_disallowed` / “Sorry, we cannot create your account with the given information.”，或 YYDSMail 的 `shared_domain_restricted`（共享域名暂停开放）时，会把当前邮箱对应的域名标记为本地不可用并自动切换新邮箱重试；注册页会在学习模式下展示可编辑的黑名单域名列表和信任域名列表，支持新增、编辑、删除、清空全部并立即生效
 - 注册流程已对齐当前官方浏览器链路：邮箱阶段会先走 `authorize` + `authorize/continue`，验证码通过后的 `create_account` 会使用当前官方 Sentinel SDK 生成 `OpenAI-Sentinel-Token` 与 `OpenAI-Sentinel-SO-Token` 两个请求头；密码登录也会复用同一套 SDK 生成逻辑，日志只记录 SDK 版本、token 长度和 `so-token` 是否生成，不打印明文
 - 注册邮箱 API 遇到 HTTP 429 时会触发同进程注册线程共享的 30 秒冷却，冷却后自动重试当前请求
 

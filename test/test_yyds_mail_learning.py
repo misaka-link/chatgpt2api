@@ -231,6 +231,85 @@ def test_yyds_learning_retries_when_api_returns_locally_disabled_domain(monkeypa
     assert mailbox["learning_mode"] is True
 
 
+def test_yyds_learning_retries_when_shared_domain_is_restricted(monkeypatch, tmp_path):
+    store = domain_reputation.DomainReputationStore(tmp_path / "mail_domain_reputation.json")
+    monkeypatch.setattr(domain_reputation, "store", store)
+    monkeypatch.setattr(mail_provider, "domain_index", 0)
+
+    provider = mail_provider.YydsMailProvider(
+        {
+            "provider_ref": "yyds_mail#1",
+            "api_key": "token",
+            "domain": ["bad.test", "good.test"],
+            "learning_mode": True,
+            "domain_explore_rate": 0,
+        },
+        {"request_timeout": 1, "wait_timeout": 1, "wait_interval": 1, "user_agent": "pytest", "proxy": ""},
+    )
+    requests = []
+
+    def fake_request(method, path, token="", params=None, payload=None, expected=(200, 201, 204)):
+        if path == "/domains":
+            return {"items": []}
+        requests.append(dict(payload or {}))
+        if len(requests) == 1:
+            raise mail_provider.YydsMailAPIError(
+                method,
+                path,
+                status_code=403,
+                error_code=mail_provider.YYDS_SHARED_DOMAIN_RESTRICTED_ERROR_CODE,
+                error_message=mail_provider.YYDS_SHARED_DOMAIN_RESTRICTED_ERROR_MESSAGE,
+            )
+        return {"address": f"user@{payload['domain']}", "token": "mail-token"}
+
+    provider._request = fake_request
+    try:
+        mailbox = provider.create_mailbox("user")
+    finally:
+        provider.close()
+
+    assert [item["domain"] for item in requests] == ["bad.test", "good.test"]
+    assert mailbox["domain"] == "good.test"
+    assert store.is_disabled("yyds_mail", "bad.test") is True
+
+
+def test_yyds_learning_refreshes_domain_cache_after_shared_domain_restricted(monkeypatch, tmp_path):
+    store = domain_reputation.DomainReputationStore(tmp_path / "mail_domain_reputation.json")
+    monkeypatch.setattr(domain_reputation, "store", store)
+
+    provider = mail_provider.YydsMailProvider(
+        {"provider_ref": "yyds_mail#1", "api_key": "token", "domain": [], "learning_mode": True, "domain_explore_rate": 0},
+        {"request_timeout": 1, "wait_timeout": 1, "wait_interval": 1, "user_agent": "pytest", "proxy": ""},
+    )
+    domain_calls = {"count": 0}
+
+    def fake_request(method, path, token="", params=None, payload=None, expected=(200, 201, 204)):
+        if path == "/domains":
+            domain_calls["count"] += 1
+            if domain_calls["count"] == 1:
+                return {"items": [{"domain": "bad.test", "available": True}]}
+            return {"items": [{"domain": "good.test", "available": True}]}
+        if payload["domain"] == "bad.test":
+            raise mail_provider.YydsMailAPIError(
+                method,
+                path,
+                status_code=403,
+                error_code=mail_provider.YYDS_SHARED_DOMAIN_RESTRICTED_ERROR_CODE,
+                error_message=mail_provider.YYDS_SHARED_DOMAIN_RESTRICTED_ERROR_MESSAGE,
+            )
+        return {"address": f"user@{payload['domain']}", "token": "mail-token"}
+
+    provider._request = fake_request
+    try:
+        mailbox = provider.create_mailbox("user")
+    finally:
+        provider.close()
+
+    assert domain_calls["count"] == 2
+    assert mailbox["domain"] == "good.test"
+    assert store.is_disabled("yyds_mail", "bad.test") is True
+
+
 def test_register_retries_new_yyds_mailbox_on_registration_disallowed(monkeypatch, tmp_path):
     store = domain_reputation.DomainReputationStore(tmp_path / "mail_domain_reputation.json")
     monkeypatch.setattr(domain_reputation, "store", store)
@@ -249,6 +328,7 @@ def test_register_retries_new_yyds_mailbox_on_registration_disallowed(monkeypatc
     monkeypatch.setattr(openai_register, "create_mailbox", lambda username=None, register_proxy="": dict(mailboxes.pop(0)))
     monkeypatch.setattr(openai_register, "wait_for_code", lambda mailbox, register_proxy="": "123456")
     monkeypatch.setattr(openai_register.PlatformRegistrar, "_platform_authorize", lambda self, email, index: None)
+    monkeypatch.setattr(openai_register.PlatformRegistrar, "_authorize_continue", lambda self, email, index: None)
     monkeypatch.setattr(openai_register.PlatformRegistrar, "_register_user", lambda self, email, password, index: None)
     monkeypatch.setattr(openai_register.PlatformRegistrar, "_send_otp", lambda self, index: None)
     monkeypatch.setattr(openai_register.PlatformRegistrar, "_validate_otp", lambda self, code, index: None)

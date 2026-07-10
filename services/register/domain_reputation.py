@@ -14,7 +14,9 @@ HARD_FAILURE_MARKERS = (
     "unsupported_email",
     "account_creation_failed",
     "registration_disallowed",
+    "shared_domain_restricted",
     "Sorry, we cannot create your account with the given information.",
+    "This shared domain is currently restricted and not accepting new public addresses",
     "The email you provided is not supported",
     "Failed to create account. Please try again.",
 )

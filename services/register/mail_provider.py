@@ -33,9 +33,13 @@ MAIL_API_429_COOLDOWN_SECONDS = 30
 mail_api_cooldown_lock = Lock()
 mail_api_cooldown_until = 0.0
 YYDS_DOMAINS_CACHE_SECONDS = 600.0
+YYDS_SHARED_DOMAIN_RESTRICTED_ERROR_CODE = "shared_domain_restricted"
+YYDS_SHARED_DOMAIN_RESTRICTED_ERROR_MESSAGE = "This shared domain is currently restricted and not accepting new public addresses"
 YYDS_LEARNING_MAILBOX_RETRY_MARKERS = (
     "registration_disallowed",
     "Sorry, we cannot create your account with the given information.",
+    YYDS_SHARED_DOMAIN_RESTRICTED_ERROR_CODE,
+    YYDS_SHARED_DOMAIN_RESTRICTED_ERROR_MESSAGE,
 )
 
 
@@ -294,6 +298,40 @@ class LocalDomainFilteredError(RuntimeError):
     """Raised when local domain reputation leaves no usable domain."""
 
 
+class YydsMailAPIError(RuntimeError):
+    """Structured YYDSMail API error with parsed status and error code."""
+
+    def __init__(
+        self,
+        method: str,
+        path: str,
+        *,
+        status_code: int,
+        error_code: str = "",
+        error_message: str = "",
+        retry_after: int | None = None,
+        body_preview: str = "",
+    ) -> None:
+        self.method = str(method or "").upper()
+        self.path = str(path or "")
+        self.status_code = int(status_code)
+        self.error_code = str(error_code or "").strip()
+        self.error_message = str(error_message or "").strip()
+        self.retry_after = retry_after
+        self.body_preview = str(body_preview or "").strip()
+
+        parts = [f"YYDSMail 请求失败: {self.method} {self.path}", f"HTTP {self.status_code}"]
+        if self.error_code:
+            parts.append(f"errorCode={self.error_code}")
+        if self.error_message:
+            parts.append(f"error={self.error_message}")
+        elif self.body_preview:
+            parts.append(f"body={self.body_preview}")
+        if self.retry_after is not None:
+            parts.append(f"retry_after={self.retry_after}")
+        super().__init__(", ".join(parts))
+
+
 def _config(mail_config: dict) -> dict:
     return {
         "request_timeout": float(mail_config.get("request_timeout") or 30),
@@ -404,6 +442,14 @@ def _extract_yyds_domains(data: Any) -> list[str]:
             seen.add(domain)
             domains.append(domain)
     return domains
+
+
+def _parse_retry_after(response: Any) -> int | None:
+    headers = getattr(response, "headers", None)
+    if not headers:
+        return None
+    value = str(headers.get("Retry-After") or "").strip()
+    return int(value) if value.isdigit() else None
 
 
 def _create_session(conf: dict):
@@ -1292,16 +1338,54 @@ class YydsMailProvider(BaseMailProvider):
         self.session = _create_session(conf)
         self.session.headers.update({"User-Agent": conf["user_agent"], "Accept": "application/json", "Content-Type": "application/json"})
 
+    @staticmethod
+    def _is_retryable_domain_error(error: Exception | str | None) -> bool:
+        if isinstance(error, YydsMailAPIError):
+            return error.error_code == YYDS_SHARED_DOMAIN_RESTRICTED_ERROR_CODE
+        reason = str(error or "")
+        return YYDS_SHARED_DOMAIN_RESTRICTED_ERROR_CODE in reason or YYDS_SHARED_DOMAIN_RESTRICTED_ERROR_MESSAGE in reason
+
+    def _record_restricted_domain(self, domain: str, error: Exception | str | None) -> dict[str, Any]:
+        normalized = _normalize_domain_text(domain)
+        if not normalized:
+            return {}
+        self._available_domains_cache = None
+        return domain_reputation.store.record_failure(self.name, normalized, str(error or ""))
+
     def _request(self, method: str, path: str, token: str = "", params: dict | None = None, payload: dict | None = None, expected: tuple[int, ...] = (200, 201, 204)):
         headers = {"Authorization": f"Bearer {token}"} if token else {"X-API-Key": self.api_key}
         resp = _mail_api_request(self.session, method, f"{self.api_base}{path}", headers=headers, params=params, json=payload, timeout=self.conf["request_timeout"], verify=False)
-        if resp.status_code not in expected:
-            raise RuntimeError(f"YYDSMail 请求失败: {method} {path}, HTTP {resp.status_code}, body={resp.text[:300]}")
         if resp.status_code == 204:
             return {}
-        data = resp.json()
+        try:
+            data = resp.json()
+        except Exception as error:
+            raise RuntimeError(f"YYDSMail 响应解析失败: {method} {path}, HTTP {resp.status_code}, body={resp.text[:300]}") from error
+        error_code = ""
+        error_message = ""
+        if isinstance(data, dict):
+            error_code = str(data.get("errorCode") or "").strip()
+            error_message = str(data.get("error") or data.get("message") or "").strip()
+        if resp.status_code not in expected:
+            raise YydsMailAPIError(
+                method,
+                path,
+                status_code=resp.status_code,
+                error_code=error_code,
+                error_message=error_message,
+                retry_after=_parse_retry_after(resp),
+                body_preview=resp.text[:300],
+            )
         if isinstance(data, dict) and data.get("success") is False:
-            raise RuntimeError(f"YYDSMail 请求失败: {data.get('errorCode') or data.get('error')}")
+            raise YydsMailAPIError(
+                method,
+                path,
+                status_code=resp.status_code,
+                error_code=error_code,
+                error_message=error_message,
+                retry_after=_parse_retry_after(resp),
+                body_preview=resp.text[:300],
+            )
         return data.get("data") if isinstance(data, dict) and isinstance(data.get("data"), (dict, list)) else data
 
     @staticmethod
@@ -1366,7 +1450,7 @@ class YydsMailProvider(BaseMailProvider):
                         payload["domain"] = domain
                 if self.subdomain:
                     payload["subdomain"] = self.subdomain
-                data = self._request("POST", "/accounts/wildcard", payload=payload)
+                request_path = "/accounts/wildcard"
             else:
                 api_domains = self._fetch_available_domains()
                 seed_domains = api_domains or self.domain
@@ -1379,7 +1463,17 @@ class YydsMailProvider(BaseMailProvider):
                     payload["autoDomainStrategy"] = "balanced"
                 if self.subdomain:
                     payload["subdomain"] = self.subdomain
-                data = self._request("POST", "/accounts", payload=payload)
+                request_path = "/accounts"
+            attempted_domain = _normalize_domain_text(payload.get("domain"))
+            try:
+                data = self._request("POST", request_path, payload=payload)
+            except YydsMailAPIError as error:
+                if self.learning_mode and attempted_domain and self._is_retryable_domain_error(error):
+                    self._record_restricted_domain(attempted_domain, error)
+                    last_disabled = attempted_domain
+                    if attempt + 1 < max_attempts:
+                        continue
+                raise
             address = str(data.get("address") or data.get("email") or "").strip()
             token = str(data.get("token") or data.get("temp_token") or data.get("tempToken") or data.get("access_token") or "").strip()
             if not address or not token:
