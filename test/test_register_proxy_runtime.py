@@ -117,6 +117,64 @@ class RegisterProxyRuntimeTests(unittest.TestCase):
         self.assertEqual(request_calls[0]["headers"]["referer"], f"{openai_register.auth_base}/create-account")
         sentinel_mock.assert_called_once()
 
+    def test_skip_passkey_enrollment_posts_official_skip_endpoint(self):
+        request_calls = []
+
+        def fake_request(session, method, url, retry_attempts=3, **kwargs):
+            request_calls.append({"method": method, "url": url, "headers": dict(kwargs.get("headers") or {})})
+            return (
+                FakeResponse(
+                    status_code=200,
+                    payload={
+                        "continue_url": "https://platform.openai.com/auth/callback?code=after-skip",
+                    },
+                ),
+                "",
+            )
+
+        with patch.object(openai_register, "create_session", return_value=FakeSession()), patch.object(
+            openai_register,
+            "request_with_local_retry",
+            side_effect=fake_request,
+        ):
+            registrar = openai_register.PlatformRegistrar(proxy="")
+            continue_url = registrar._skip_passkey_enrollment(1)
+
+        self.assertEqual(continue_url, "https://platform.openai.com/auth/callback?code=after-skip")
+        self.assertEqual(len(request_calls), 1)
+        self.assertEqual(request_calls[0]["method"], "post")
+        self.assertTrue(request_calls[0]["url"].endswith("/api/accounts/create-account/passkey/enrollment/skip"))
+        self.assertEqual(request_calls[0]["headers"]["referer"], f"{openai_register.auth_base}/create-account-enroll-passkey")
+
+    def test_create_account_skips_passkey_upsell_before_extracting_oauth_code(self):
+        responses = [
+            (
+                FakeResponse(
+                    status_code=200,
+                    payload={"continue_url": "https://auth.openai.com/create-account-enroll-passkey"},
+                ),
+                "",
+            ),
+        ]
+
+        with patch.object(openai_register, "create_session", return_value=FakeSession()), patch.object(
+            openai_register,
+            "_apply_sentinel_headers",
+        ), patch.object(
+            openai_register,
+            "request_with_local_retry",
+            side_effect=responses,
+        ), patch.object(
+            openai_register.PlatformRegistrar,
+            "_skip_passkey_enrollment",
+            return_value="https://platform.openai.com/auth/callback?code=from-passkey-skip",
+        ) as skip_mock:
+            registrar = openai_register.PlatformRegistrar(proxy="")
+            registrar._create_account("Test User", "2000-01-01", 1)
+
+        skip_mock.assert_called_once_with(1)
+        self.assertEqual(registrar.platform_auth_code, "from-passkey-skip")
+
     def test_register_flow_calls_authorize_continue_before_password_submit(self):
         registrar = openai_register.PlatformRegistrar(proxy="")
         call_order = []

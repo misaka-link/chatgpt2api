@@ -413,13 +413,19 @@ def extract_oauth_callback_params_from_url(url: str) -> dict[str, str] | None:
     if not url:
         return None
     try:
-        params = parse_qs(urlparse(url).query)
+        parsed = urlparse(url)
+        params = parse_qs(parsed.query)
     except Exception:
         return None
     code = str((params.get("code") or [""])[0]).strip()
     if not code:
         return None
-    return {"code": code, "state": str((params.get("state") or [""])[0]).strip(), "scope": str((params.get("scope") or [""])[0]).strip()}
+    return {
+        "code": code,
+        "state": str((params.get("state") or [""])[0]).strip(),
+        "scope": str((params.get("scope") or [""])[0]).strip(),
+        "path": str(parsed.path or "").strip(),
+    }
 
 
 def request_platform_oauth_token(session: requests.Session, code: str, code_verifier: str) -> dict | None:
@@ -608,6 +614,17 @@ class PlatformRegistrar:
             raise RuntimeError(f"authorize_continue_unexpected_continue_url:{continue_url}")
         step(index, "注册邮箱提交完成")
 
+    @staticmethod
+    def _is_passkey_upsell_continue_url(continue_url: str) -> bool:
+        value = str(continue_url or "").strip().lower()
+        if not value:
+            return False
+        try:
+            path = str(urlparse(value).path or "").strip().lower()
+        except Exception:
+            path = value
+        return path == "/create-account-enroll-passkey" or path.endswith("/create-account-enroll-passkey")
+
     def _register_user(self, email: str, password: str, index: int) -> None:
         step(index, "开始提交注册密码")
         url = f"{auth_base}/api/accounts/user/register"
@@ -632,6 +649,33 @@ class PlatformRegistrar:
             detail = f", detail={json.dumps(data, ensure_ascii=False)}" if data else ""
             raise RuntimeError(error or f"user_register_http_{getattr(resp, 'status_code', 'unknown')}{detail}")
         step(index, "提交注册密码完成")
+
+    def _skip_passkey_enrollment(self, index: int) -> str:
+        step(index, "检测到官方 Passkey 引导页，自动跳过")
+        url = f"{auth_base}/api/accounts/create-account/passkey/enrollment/skip"
+        headers = self._json_headers(f"{auth_base}/create-account-enroll-passkey")
+        headers["accept"] = "application/json"
+        headers = _headers_with_clearance(headers, url, self.proxy, self.clearance_user_agent)
+        resp, error = request_with_local_retry(self.session, "post", url, headers=headers, verify=False)
+        if _is_cloudflare_challenge(resp):
+            bundle = self._refresh_cloudflare_clearance(auth_base, index)
+            if bundle is None:
+                raise RuntimeError(_cloudflare_block_message(resp, reason=self.clearance_failure_reason))
+            headers = self._json_headers(f"{auth_base}/create-account-enroll-passkey")
+            headers["accept"] = "application/json"
+            headers = _headers_with_clearance(headers, url, self.proxy, self.clearance_user_agent)
+            resp, error = request_with_local_retry(self.session, "post", url, headers=headers, verify=False)
+            if _is_cloudflare_challenge(resp):
+                raise RuntimeError(_cloudflare_block_message(resp, "Cloudflare clearance 重试仍被拦截"))
+        if resp is None or resp.status_code != 200:
+            data = _response_json(resp) if resp is not None else {}
+            detail = f", detail={json.dumps(data, ensure_ascii=False)}" if data else ""
+            raise RuntimeError(error or f"skip_passkey_enrollment_http_{getattr(resp, 'status_code', 'unknown')}{detail}")
+        continue_url = str(_response_json(resp).get("continue_url") or "").strip()
+        if not continue_url:
+            raise RuntimeError("skip_passkey_enrollment_missing_continue_url")
+        step(index, "已跳过 Passkey 引导页")
+        return continue_url
 
     def _send_otp(self, index: int) -> None:
         step(index, "开始发送验证码")
@@ -686,7 +730,13 @@ class PlatformRegistrar:
             detail = f", detail={json.dumps(data, ensure_ascii=False)}" if data else ""
             raise RuntimeError(error or f"create_account_http_{getattr(resp, 'status_code', 'unknown')}{detail}")
         data = _response_json(resp)
-        callback_params = extract_oauth_callback_params_from_url(str(data.get("continue_url") or "").strip())
+        continue_url = str(data.get("continue_url") or "").strip()
+        callback_params = extract_oauth_callback_params_from_url(continue_url)
+        if not callback_params and self._is_passkey_upsell_continue_url(continue_url):
+            continue_url = self._skip_passkey_enrollment(index)
+            callback_params = extract_oauth_callback_params_from_url(continue_url)
+        if not callback_params:
+            raise RuntimeError(f"create_account_missing_oauth_callback:{continue_url}")
         self.platform_auth_code = str((callback_params or {}).get("code") or "").strip()
         step(index, "创建账号资料完成")
 
