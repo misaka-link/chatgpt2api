@@ -7,6 +7,7 @@ from unittest.mock import patch
 import services.account_service as account_service_module
 from services.account_service import AccountService
 from utils import sentinel as sentinel_utils
+from utils.turnstile import solve_turnstile_token
 
 
 class MemoryStorage:
@@ -108,6 +109,36 @@ class FakeSession:
 
 
 class SentinelTokenTests(unittest.TestCase):
+    def test_solve_turnstile_token_handles_dynamic_queue_replacement_and_undefined_guards(self) -> None:
+        requirements_token = "REQ"
+        inner_commands = [
+            [23, 999, 2, 200, "should-not-run"],
+            [3, "dynamic-turnstile-token"],
+        ]
+        inner_payload = json.dumps(inner_commands, separators=(",", ":"))
+        encrypted_inner = "".join(
+            chr(ord(char) ^ ord(requirements_token[index % len(requirements_token)]))
+            for index, char in enumerate(inner_payload)
+        )
+        outer_commands = [
+            [2, 100, base64.b64encode(encrypted_inner.encode("utf-8")).decode("ascii")],
+            [18, 100],
+            [1, 100, 16],
+            [14, 9, 100],
+        ]
+        outer_payload = json.dumps(outer_commands, separators=(",", ":"))
+        outer_dx = base64.b64encode(
+            "".join(
+                chr(ord(char) ^ ord(requirements_token[index % len(requirements_token)]))
+                for index, char in enumerate(outer_payload)
+            ).encode("utf-8")
+        ).decode("ascii")
+
+        self.assertEqual(
+            solve_turnstile_token(outer_dx, requirements_token),
+            base64.b64encode(b"dynamic-turnstile-token").decode("ascii"),
+        )
+
     def test_quickjs_browser_shim_supports_dom_storage_and_geometry(self) -> None:
         source = """
 var P={getRequirementsToken:function(){return 'REQ';},getRequirementsTokenBlocking:function(){return 'REQ';},getEnforcementToken:function(){return Promise.resolve('POW');},getEnforcementTokenSync:function(){return 'POW';}};

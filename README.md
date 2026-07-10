@@ -147,7 +147,7 @@ environment:
 - 支持在设置页配置 `sub2api` 服务器，筛选并批量导入其中的 OpenAI OAuth 账号
 - 后台日志管理支持按类型和日期筛选、查看详情、删除选中记录，并可一键清空当前筛选结果
 - 注册邮箱支持 YYDSMail 动态域名获取和学习模式，会优先使用接口返回的可用域名，接口不可用时回退到配置域名或官方自动选域策略；当学习模式遇到 OpenAI 的 `registration_disallowed` / “Sorry, we cannot create your account with the given information.”，或 YYDSMail 的 `shared_domain_restricted`（共享域名暂停开放）时，会把当前邮箱对应的域名标记为本地不可用并自动切换新邮箱重试；注册页会在学习模式下展示可编辑的黑名单域名列表和信任域名列表，支持新增、编辑、删除、清空全部并立即生效
-- 注册流程已对齐当前官方浏览器链路：邮箱阶段会先走 `authorize` + `authorize/continue`，验证码通过后的 `create_account` 会使用当前官方 Sentinel SDK 生成 `OpenAI-Sentinel-Token` 与 `OpenAI-Sentinel-SO-Token` 两个请求头；QuickJS 运行时会补齐官方 SDK 当前依赖的 DOM / Storage / Navigator / timer 能力，并对 `turnstile.required`、`so.required` 做强校验。Turnstile 会优先由官方 SDK 执行；若 SDK 因浏览器 shim 兼容性返回运行时错误或空值，则回退到本地 `dx` 指令解释器，只有两种方式都无法生成 token 时才中断，不会把错误值拼进组合 token 后继续请求；缺失 SO 或无效 Sentinel 片段也会立即中断。若官方在建号成功后先跳转到 `create-account-enroll-passkey` 引导页，后端会自动调用官方 `passkey enrollment skip` 接口继续换取 OAuth code；密码登录也会复用同一套 SDK 生成逻辑，日志只记录 `p/t/c/so` 长度、required 模式、回退状态和运行模式，不打印明文
+- 注册流程已对齐当前官方浏览器链路：邮箱阶段会先走 `authorize` + `authorize/continue`，验证码通过后的 `create_account` 会使用当前官方 Sentinel SDK 生成 `OpenAI-Sentinel-Token` 与 `OpenAI-Sentinel-SO-Token` 两个请求头；QuickJS 运行时会补齐官方 SDK 当前依赖的 DOM / Storage / Navigator / timer 能力，并对 `turnstile.required`、`so.required` 做强校验。Turnstile 会优先由官方 SDK 执行；若 SDK 因浏览器 shim 兼容性返回运行时错误或空值，则回退到本地 `dx` 指令解释器。当前本地解释器已按官方新版 turnstile VM 的动态队列切换、`Map.get()` 未定义语义与对象序列化行为对齐，只有两种方式都无法生成 token 时才中断，不会把错误值拼进组合 token 后继续请求；缺失 SO 或无效 Sentinel 片段也会立即中断。若官方在建号成功后先跳转到 `create-account-enroll-passkey` 引导页，后端会自动调用官方 `passkey enrollment skip` 接口继续换取 OAuth code；密码登录也会复用同一套 SDK 生成逻辑，日志只记录 `p/t/c/so` 长度、required 模式、回退状态和运行模式，不打印明文
 - 注册邮箱 API 遇到 HTTP 429 时会触发同进程注册线程共享的 30 秒冷却，冷却后自动重试当前请求
 
 ### 实验性 / 规划中
