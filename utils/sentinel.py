@@ -20,6 +20,7 @@ from urllib.parse import parse_qsl, urljoin, urlparse
 import quickjs
 
 from utils.log import logger
+from utils.turnstile import solve_turnstile_token
 
 if TYPE_CHECKING:
     from curl_cffi.requests import Session
@@ -819,6 +820,7 @@ def build_sentinel_token(
 
     turnstile_token = ""
     turnstile_error = ""
+    turnstile_fallback_used = False
     try:
         turnstile_token = str(runtime.call("runTurnstile", handle, timeout=5.0) or "").strip()
     except Exception as error:
@@ -829,6 +831,14 @@ def build_sentinel_token(
         if decoded_error:
             turnstile_error = decoded_error
             turnstile_token = ""
+
+    # The dx payload is self-contained. Use the existing interpreter if the
+    # SDK's browser shim cannot execute a newer browser-only instruction.
+    if not turnstile_token and challenge.turnstile.dx:
+        fallback_token = solve_turnstile_token(challenge.turnstile.dx, requirements_token)
+        if fallback_token:
+            turnstile_token = fallback_token
+            turnstile_fallback_used = True
 
     so_header = ""
     snapshot_value = ""
@@ -860,6 +870,7 @@ def build_sentinel_token(
                 "runtime_mode": SENTINEL_RUNTIME_MODE,
                 "turnstile_mode": turnstile_mode,
                 "turnstile_error": turnstile_error,
+                "turnstile_fallback_used": turnstile_fallback_used,
                 "p_length": len(enforcement_token),
                 "t_length": 0,
                 "c_length": len(challenge_token),
@@ -934,6 +945,7 @@ def build_sentinel_token(
             "so_length": len(so_header),
             "proof_error": proof_error,
             "turnstile_error": turnstile_error,
+            "turnstile_fallback_used": turnstile_fallback_used,
             "so_error": so_error,
         }
     )

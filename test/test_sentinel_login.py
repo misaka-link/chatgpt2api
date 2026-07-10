@@ -320,6 +320,56 @@ var Zn='test'; var we=function(){}; var t={}; t.init=we,t.sessionObserverToken=a
                     "oauth_create_account",
                 )
 
+    def test_build_sentinel_token_falls_back_to_dx_interpreter_when_sdk_fails(self) -> None:
+        requirements_token = "REQ"
+        commands = [[3, "fallback-turnstile-token"]]
+        encrypted_commands = "".join(
+            chr(ord(char) ^ ord(requirements_token[index % len(requirements_token)]))
+            for index, char in enumerate(json.dumps(commands, separators=(",", ":")))
+        )
+        turnstile_dx = base64.b64encode(encrypted_commands.encode("utf-8")).decode("ascii")
+
+        class Runtime:
+            sdk_bundle = type("SdkBundle", (), {"version": "20260219f9f6"})()
+
+            def call(self, name: str, *args, **kwargs):
+                if name == "getRequirementsToken":
+                    return requirements_token
+                if name == "makeHandle":
+                    return "handle-1"
+                if name == "attachRequirements":
+                    return None
+                if name == "getEnforcementToken":
+                    return "POW"
+                if name == "runTurnstile":
+                    raise RuntimeError("TypeError: not an object")
+                if name == "runCollector":
+                    return "collector-ok"
+                if name == "runSnapshot":
+                    return "snapshot-b64"
+                raise AssertionError(f"unexpected runtime call: {name}")
+
+        class Session:
+            def post(self, *args, **kwargs):
+                return FakeResponse(
+                    status_code=200,
+                    payload={
+                        "token": "challenge-token",
+                        "proofofwork": {"required": True},
+                        "turnstile": {"required": True, "dx": turnstile_dx},
+                        "so": {"required": True, "collector_dx": "collector-dx", "snapshot_dx": "snapshot-dx"},
+                    },
+                )
+
+        with patch.object(sentinel_utils._runtime_pool, "get_runtime", return_value=Runtime()):
+            sentinel_value, _, _ = sentinel_utils.build_sentinel_token(
+                Session(),
+                "device-1",
+                "oauth_create_account",
+            )
+
+        self.assertEqual(json.loads(sentinel_value)["t"], "ZmFsbGJhY2stdHVybnN0aWxlLXRva2Vu")
+
     def test_build_sentinel_token_drops_optional_invalid_turnstile_from_payload(self) -> None:
         encoded_error = base64.b64encode(b"TypeError: Cannot read properties of undefined (reading 'bind')").decode("ascii")
 
